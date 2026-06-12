@@ -97,13 +97,27 @@ def fmt_large(val):
     except: return "N/A"
 
 def to_pct(val):
+    """Convert Yahoo Finance decimal to percentage.
+    Yahoo always returns ratios as decimals (0.15 = 15%).
+    Special case: values already > 5 are assumed already in % form."""
     if val is None: return None
     try:
         v = float(val)
         if v != v: return None
-        if abs(v) <= 5: return round(v * 100, 2)
-        return round(v, 2)
+        # Yahoo returns everything as decimal: 0.0036 = 0.36%, 0.156 = 15.6%
+        # Only multiply by 100 if value looks like a decimal (< 5 in absolute)
+        # Exception: dividend yield is ALWAYS a decimal from Yahoo (0.0036 not 0.36)
+        return round(v * 100, 2)
     except: return None
+
+def to_pct_safe(val, max_reasonable=100):
+    """Like to_pct but caps at max_reasonable % to catch scale errors."""
+    result = to_pct(val)
+    if result is None: return None
+    if abs(result) > max_reasonable:
+        # Likely already in percentage form — return as-is divided back
+        return round(result / 100, 2)
+    return result
 
 def color_class(val):
     if val is None: return ""
@@ -339,13 +353,13 @@ if ticker:
 
         st.markdown("<div class='section-header'>Redditività</div>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
-        pm = to_pct(info.get('profitMargins'))
-        gm = to_pct(info.get('grossMargins'))
-        om = to_pct(info.get('operatingMargins'))
-        roe = to_pct(info.get('returnOnEquity'))
-        roa = to_pct(info.get('returnOnAssets'))
-        rg = to_pct(info.get('revenueGrowth'))
-        eg = to_pct(info.get('earningsGrowth'))
+        pm = to_pct_safe(info.get('profitMargins'), max_reasonable=200)
+        gm = to_pct_safe(info.get('grossMargins'), max_reasonable=200)
+        om = to_pct_safe(info.get('operatingMargins'), max_reasonable=200)
+        roe = to_pct_safe(info.get('returnOnEquity'), max_reasonable=500)
+        roa = to_pct_safe(info.get('returnOnAssets'), max_reasonable=200)
+        rg = to_pct_safe(info.get('revenueGrowth'), max_reasonable=300)
+        eg = to_pct_safe(info.get('earningsGrowth'), max_reasonable=500)
         with c1:
             metric_card("Margine netto", fmt_pct(pm) if pm else "N/A", color_class(pm))
             metric_card("Margine lordo", fmt_pct(gm) if gm else "N/A", color_class(gm))
@@ -377,15 +391,15 @@ if ticker:
 
         st.markdown("<div class='section-header'>Dividendo</div>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
-        dy = to_pct(info.get('dividendYield') or info.get('trailingAnnualDividendYield'))
+        dy = to_pct_safe(info.get('dividendYield') or info.get('trailingAnnualDividendYield'), max_reasonable=30)
         with c1:
             metric_card("Dividend Yield", fmt_pct(dy) if dy else "N/A", "blue" if dy and dy > 0 else "")
             metric_card("Dividendo annuo", fmt_num(info.get('dividendRate') or info.get('trailingAnnualDividendRate'), 3))
         with c2:
-            metric_card("Payout Ratio", fmt_pct(to_pct(info.get('payoutRatio'))))
+            metric_card("Payout Ratio", fmt_pct(to_pct_safe(info.get('payoutRatio'), max_reasonable=200)))
             metric_card("Ex-Dividend Date", str(info.get('exDividendDate', 'N/A'))[:10])
         with c3:
-            metric_card("5Y Avg Yield", fmt_pct(to_pct(info.get('fiveYearAvgDividendYield'))))
+            metric_card("5Y Avg Yield", fmt_pct(to_pct_safe(info.get('fiveYearAvgDividendYield'), max_reasonable=30)))
             metric_card("EPS (trailing)", fmt_num(info.get('trailingEps'), 2))
 
         st.markdown("<div class='section-header'>Per Azione</div>", unsafe_allow_html=True)

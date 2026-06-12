@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
+from data_sources import enrich_info
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -136,10 +137,18 @@ def metric_card(label, value, color=""):
 
 # ── Data fetching (no cache on yfinance objects) ──────────────────────────────
 @st.cache_data(ttl=300)
-def fetch_info(ticker: str) -> dict:
+def fetch_info(ticker: str, fmp_key: str = "") -> dict:
     try:
-        return yf.Ticker(ticker).info or {}
-    except: return {}
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        if not info:
+            return {}
+        # Enrich with additional sources
+        info = enrich_info(t, ticker, info, fmp_key)
+        return info
+    except Exception as e:
+        print(f"[fetch_info] Error: {e}")
+        return {}
 
 @st.cache_data(ttl=300)
 def fetch_hist(ticker: str, period: str) -> pd.DataFrame:
@@ -233,7 +242,8 @@ if ticker:
 
 # ── Load & display ────────────────────────────────────────────────────────────
 if ticker:
-    info = fetch_info(ticker)
+    fmp_key = st.secrets.get("FMP_API_KEY", "") if hasattr(st, 'secrets') else ""
+    info = fetch_info(ticker, fmp_key)
     hist = fetch_hist(ticker, st.session_state.period)
 
     if hist.empty:

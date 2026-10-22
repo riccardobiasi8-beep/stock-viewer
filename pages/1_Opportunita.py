@@ -1,5 +1,7 @@
 import concurrent.futures as cf
+import random
 import re
+import time
 from collections import Counter
 
 import pandas as pd
@@ -48,18 +50,48 @@ VERDICT_COLORS = {"valido": "#30d158", "osservazione": "#ff9f0a", "scartato": "#
 
 
 # ── Dati ──────────────────────────────────────────────────────────────────────
-def fetch_info(ticker: str, fmp_key: str) -> dict:
-    """Nessuna chiamata Streamlit qui: la funzione gira anche nei thread."""
+KEY_FIELDS = ("trailingPE", "forwardPE", "enterpriseToEbitda", "profitMargins",
+              "returnOnEquity", "freeCashflow")
+_INFO_CACHE = {}          # ticker -> (istante, info): evita di riscaricare entro 30 minuti
+DOWNLOAD_FAILED = "Fondamentali non scaricati: Yahoo ha limitato le richieste, riprova tra qualche minuto"
+
+
+def _has_fundamentals(info: dict) -> bool:
+    return bool(info) and any(info.get(k) is not None for k in KEY_FIELDS + ("marketCap",))
+
+
+def fetch_info(ticker: str, fmp_key: str, retries: int = 3) -> dict | None:
+    """
+    Scarica i fondamentali con nuovi tentativi se Yahoo blocca le richieste.
+    Restituisce None se il download fallisce (diverso da 'dati che non esistono').
+    Nessuna chiamata Streamlit qui: la funzione gira anche nei thread.
+    """
+    cached = _INFO_CACHE.get(ticker)
+    if cached and time.time() - cached[0] < 1800:
+        return cached[1]
+
     t = yf.Ticker(ticker)
-    try:
-        info = t.info or {}
-    except Exception:
-        info = {}
-    if info:
+    info = {}
+    for attempt in range(retries):
+        try:
+            info = t.info or {}
+        except Exception as e:
+            print(f"[Opportunità] info {ticker} tentativo {attempt + 1}: {e}")
+            info = {}
+        if _has_fundamentals(info):
+            break
+        time.sleep(2 * (attempt + 1) + random.random())
+    if not _has_fundamentals(info):
+        return None
+
+    # Bilanci solo se mancano i dati chiave: costa altre richieste a Yahoo
+    if sum(info.get(k) is not None for k in KEY_FIELDS) < 3:
         try:
             info = enrich_info(t, ticker, info, fmp_key)
         except Exception as e:
             print(f"[Opportunità] enrich {ticker}: {e}")
+
+    _INFO_CACHE[ticker] = (time.time(), info)
     return info
 
 
@@ -105,6 +137,8 @@ def error_result(ticker: str, reason: str) -> dict:
 def analyze_with_history(ticker: str, hist, index_hist, fmp_key: str) -> dict:
     try:
         info = fetch_info(ticker, fmp_key)
+        if info is None:
+            return error_result(ticker, DOWNLOAD_FAILED)
         return analyze(ticker, info, hist, index_hist, market_index_for(ticker))
     except Exception as e:
         return error_result(ticker, f"Dati non recuperabili: {e}")
@@ -345,7 +379,7 @@ with tab_scan:
 
             if survivors:
                 progress.progress(0.5, text=f"Passaggio 2 di 2: analizzo i fondamentali di {len(survivors)} titoli…")
-                with cf.ThreadPoolExecutor(max_workers=6) as pool:
+                with cf.ThreadPoolExecutor(max_workers=3) as pool:
                     futures = [pool.submit(analyze_with_history, t, hists[t],
                                            index_map[market_index_for(t)], fmp_key) for t in survivors]
                     for i, fut in enumerate(cf.as_completed(futures), start=1):
@@ -357,9 +391,14 @@ with tab_scan:
 
     results = st.session_state.get("scan_results")
     if results:
+        not_loaded = [r for r in results if r.get("exclusions", [None])[:1] == [DOWNLOAD_FAILED]]
         selected = [r for r in results if r["verdict"] != "scartato"]
-        rejected = [r for r in results if r["verdict"] == "scartato"]
-        st.markdown(f"<div class='sec'>{len(selected)} titoli selezionati su {len(results)}</div>",
+        rejected = [r for r in results if r["verdict"] == "scartato" and r not in not_loaded]
+        if not_loaded:
+            st.warning(f"{len(not_loaded)} titoli non analizzati perché Yahoo ha limitato le richieste. "
+                       "Rilancia la scansione tra qualche minuto: i titoli già scaricati restano in memoria "
+                       "e la seconda volta è più veloce.")
+        st.markdown(f"<div class='sec'>{len(selected)} titoli selezionati su {len(results) - len(not_loaded)} analizzati</div>",
                     unsafe_allow_html=True)
         if selected:
             table = pd.DataFrame([{

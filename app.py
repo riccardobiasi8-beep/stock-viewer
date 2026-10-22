@@ -187,7 +187,10 @@ def search_tickers(query: str) -> list:
 # ── App ───────────────────────────────────────────────────────────────────────
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 st.markdown("## 📈 Stock Viewer")
-st.page_link("pages/1_Opportunita.py", label="Cerca opportunità di trading", icon="🎯")
+try:
+    st.page_link("pages/1_Opportunita.py", label="Cerca opportunità di trading", icon="🎯")
+except Exception:
+    pass  # la pagina non è ancora presente nel repo: l'app principale funziona comunque
 
 # Session state
 if "ticker" not in st.session_state:

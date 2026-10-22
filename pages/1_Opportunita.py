@@ -11,8 +11,7 @@ import yfinance as yf
 from data_sources import enrich_info
 from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, index_candidates_for,
                          sort_key, technical_precheck)
-from universes import (EUROPE_EXCHANGES, EXCHANGES, UNIVERSES, fetch_exchange,
-                       fetch_universe)
+from universes import EUROPE_EXCHANGES, EXCHANGES, US_UNIVERSES, fetch_universe
 
 st.set_page_config(page_title="Opportunità", page_icon="🎯", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -164,27 +163,6 @@ def cached_analysis(ticker: str, fmp_key: str) -> dict:
     return analyze_with_history(ticker, hist, index_hist, symbol, fmp_key)
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
-def _exchange_ok(name: str, min_cap_eur_m: int):
-    # Solo l'elenco completo di Yahoo resta in memoria: il ripiego su Wikipedia no
-    return fetch_exchange(name, min_cap_eur_m, use_fallback=False)
-
-
-def load_exchange(name: str, min_cap_eur_m: int):
-    try:
-        symbols, source = _exchange_ok(name, min_cap_eur_m)
-        return symbols, source, None
-    except Exception as e:
-        error = str(e)
-    fallback = EXCHANGES[name].get("fallback")
-    if fallback:
-        symbols, _, fb_error = load_universe(fallback)
-        if symbols:
-            return symbols, f"Wikipedia, solo {fallback.split(' (')[0]}", None
-        error += f" | Wikipedia: {fb_error}"
-    return [], None, error
-
-
 @st.cache_data(ttl=86400, show_spinner=False)
 def _universe_ok(name: str):
     symbols = fetch_universe(name)
@@ -199,6 +177,25 @@ def load_universe(name: str):
         return _universe_ok(name), "Wikipedia", None
     except Exception as e:
         return [], None, f"{type(e).__name__}: {str(e)[:150]}"
+
+
+def load_exchange(name: str):
+    """Unisce gli indici di una borsa; segnala quelli che non si sono potuti leggere."""
+    symbols, loaded, errors = [], [], []
+    for index_name in EXCHANGES[name]:
+        short = index_name.split(" (")[0]
+        index_symbols, _, error = load_universe(index_name)
+        if index_symbols:
+            symbols += index_symbols
+            loaded.append(short)
+        else:
+            errors.append((short, error))
+    if not symbols:
+        return [], None, " | ".join(f"{n}: {e}" for n, e in errors)
+    label = " + ".join(loaded)
+    if errors:
+        label += "; non letto: " + ", ".join(n for n, _ in errors)
+    return list(dict.fromkeys(symbols)), label, None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -380,33 +377,28 @@ with tab_single:
         st.caption("Scrivi il nome dell'azienda o il ticker.")
 
 with tab_scan:
-    st.markdown("<div class='card-sub' style='margin-bottom:6px'>Borse europee: tutte le società "
-                "quotate sopra la capitalizzazione minima, lette da Yahoo Finance.</div>",
+    st.markdown("<div class='card-sub' style='margin-bottom:6px'>Per ogni borsa europea si usano "
+                "i titoli dei suoi indici principali, letti da Wikipedia.</div>",
                 unsafe_allow_html=True)
     all_europe = st.checkbox("Tutta l'Europa (16 borse)")
     exchanges = st.multiselect("Borse europee", list(EXCHANGES), default=[],
-                               disabled=all_europe,
-                               placeholder="Scegli una o più borse")
-    min_cap = st.select_slider("Capitalizzazione minima (milioni di euro)",
-                               options=[250, 500, 1000, 2000, 5000], value=1000)
-    chosen = st.multiselect("Indici (USA e altri)", list(UNIVERSES),
-                            default=["S&P 500 (USA)"])
+                               disabled=all_europe, placeholder="Scegli una o più borse")
+    chosen = st.multiselect("Indici USA", US_UNIVERSES, default=["S&P 500 (USA)"])
     extra = st.text_input("Altri ticker (facoltativo)",
                           placeholder="Separati da virgola, es. BC.MI, ASML.AS, NOVO-B.CO")
     if all_europe:
-        st.caption("Tutta l'Europa con questa soglia richiede in genere da 5 a 15 minuti. "
-                   "Per provare, scegli prima due o tre borse.")
+        st.caption("Tutta l'Europa sono circa 800 titoli: la scansione richiede alcuni minuti.")
 
     if st.button("Scansiona"):
         tickers, failed, sources = [], {}, {}
         status = st.empty()
-        jobs = [(n, lambda n=n: load_exchange(n, min_cap)) for n in (EUROPE_EXCHANGES if all_europe else exchanges)]
+        jobs = [(n, lambda n=n: load_exchange(n)) for n in (EUROPE_EXCHANGES if all_europe else exchanges)]
         jobs += [(n, lambda n=n: load_universe(n)) for n in chosen]
         for name, load in jobs:
             status.caption(f"Leggo l'elenco di {name}…")
             symbols, source, error = load()
             if symbols:
-                sources[name] = f"{len(symbols)}" + ("" if source == "Yahoo, borsa" else f" ({source})")
+                sources[name] = f"{len(symbols)}" + (f" ({source})" if source != "Wikipedia" else "")
                 tickers += symbols
             else:
                 failed[name] = error or "elenco vuoto"

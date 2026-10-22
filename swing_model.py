@@ -60,32 +60,41 @@ SECTOR_REF = {
 DEFAULT_REF = {"pe": 17, "ev_ebitda": 11}
 LEVERAGE_OK_SECTORS = {"Financial Services", "Real Estate", "Utilities"}
 
-# Indice di riferimento in base alla borsa del titolo
+# Indici di riferimento per il regime di mercato, in ordine di preferenza.
+# Se quello nazionale non è disponibile su Yahoo si ripiega sull'Euro Stoxx 50.
+EUROPE_FALLBACK_INDEX = "^STOXX50E"
 INDEX_BY_SUFFIX = {
-    ".MI": "FTSEMIB.MI", ".DE": "^GDAXI", ".F": "^GDAXI", ".PA": "^FCHI",
-    ".L": "^FTSE", ".AS": "^AEX", ".MC": "^IBEX", ".SW": "^SSMI",
-    ".BR": "^BFX", ".T": "^N225", ".HK": "^HSI", ".TO": "^GSPTSE",
-    ".KS": "^KS11", ".AX": "^AXJO",
+    ".MI": ["FTSEMIB.MI"], ".DE": ["^GDAXI"], ".F": ["^GDAXI"], ".PA": ["^FCHI"],
+    ".L": ["^FTSE"], ".AS": ["^AEX"], ".MC": ["^IBEX"], ".SW": ["^SSMI"],
+    ".BR": ["^BFX"], ".LS": ["PSI20.LS"], ".VI": ["^ATX"], ".IR": ["^ISEQ"],
+    ".ST": ["^OMX"], ".CO": ["^OMXC25"], ".HE": ["^OMXH25"], ".OL": ["OSEBX.OL"],
+    ".WA": ["WIG20.WA"],
+    ".T": ["^N225"], ".HK": ["^HSI"], ".TO": ["^GSPTSE"], ".KS": ["^KS11"], ".AX": ["^AXJO"],
 }
+EUROPEAN_SUFFIXES = {".MI", ".DE", ".F", ".PA", ".L", ".AS", ".MC", ".SW", ".BR", ".LS",
+                     ".VI", ".IR", ".ST", ".CO", ".HE", ".OL", ".WA"}
 INDEX_NAMES = {
     "^GSPC": "S&P 500", "FTSEMIB.MI": "FTSE MIB", "^GDAXI": "DAX",
     "^FCHI": "CAC 40", "^FTSE": "FTSE 100", "^AEX": "AEX", "^IBEX": "IBEX 35",
     "^SSMI": "SMI", "^BFX": "BEL 20", "^N225": "Nikkei 225", "^HSI": "Hang Seng",
     "^GSPTSE": "TSX", "^KS11": "KOSPI", "^AXJO": "ASX 200",
+    "PSI20.LS": "PSI 20", "^ATX": "ATX", "^ISEQ": "ISEQ", "^OMX": "OMX Stockholm 30",
+    "^OMXC25": "OMX Copenhagen 25", "^OMXH25": "OMX Helsinki 25", "OSEBX.OL": "Oslo Børs",
+    "WIG20.WA": "WIG20", "^STOXX50E": "Euro Stoxx 50",
 }
 
 # Cambi approssimati, usati solo per il filtro di liquidità
 FX_TO_EUR_APPROX = {
     "EUR": 1.0, "USD": 0.9, "GBP": 1.15, "GBp": 0.0115, "CHF": 1.05,
     "CAD": 0.65, "AUD": 0.6, "JPY": 0.006, "HKD": 0.115, "KRW": 0.00066,
-    "SEK": 0.087, "NOK": 0.085, "DKK": 0.134,
+    "SEK": 0.087, "NOK": 0.085, "DKK": 0.134, "PLN": 0.23,
 }
 
 CURRENCY_BY_SUFFIX = {
     ".MI": "EUR", ".DE": "EUR", ".F": "EUR", ".PA": "EUR", ".AS": "EUR", ".MC": "EUR",
     ".BR": "EUR", ".LS": "EUR", ".VI": "EUR", ".HE": "EUR", ".IR": "EUR",
     ".L": "GBp", ".SW": "CHF", ".T": "JPY", ".HK": "HKD", ".TO": "CAD",
-    ".KS": "KRW", ".AX": "AUD",
+    ".KS": "KRW", ".AX": "AUD", ".ST": "SEK", ".CO": "DKK", ".OL": "NOK", ".WA": "PLN",
 }
 
 VERDICT_LABELS = {
@@ -118,11 +127,19 @@ def _mean(values):
     return sum(vals) / len(vals) if vals else None
 
 
-def market_index_for(ticker: str) -> str:
+def index_candidates_for(ticker: str) -> list:
+    """Indici da provare, in ordine: prima quello nazionale, poi quello europeo."""
     if "." not in ticker:
-        return "^GSPC"
+        return ["^GSPC"]
     suffix = "." + ticker.rsplit(".", 1)[1].upper()
-    return INDEX_BY_SUFFIX.get(suffix, "^GSPC")
+    candidates = list(INDEX_BY_SUFFIX.get(suffix, ["^GSPC"]))
+    if suffix in EUROPEAN_SUFFIXES:
+        candidates.append(EUROPE_FALLBACK_INDEX)
+    return candidates
+
+
+def market_index_for(ticker: str) -> str:
+    return index_candidates_for(ticker)[0]
 
 
 def guess_currency(ticker: str) -> str:
@@ -505,7 +522,7 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
     result = {
         "ticker": ticker,
         "name": info.get("longName") or info.get("shortName") or ticker,
-        "currency": info.get("currency") or "",
+        "currency": info.get("currency") or guess_currency(ticker),
         "price": None, "verdict": "scartato", "verdict_label": VERDICT_LABELS["scartato"],
         "composite": None, "scores": {}, "labels": {}, "plan": None,
         "exclusions": [], "warnings": [], "details": {},

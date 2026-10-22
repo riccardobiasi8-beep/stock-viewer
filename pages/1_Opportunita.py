@@ -9,9 +9,10 @@ import streamlit as st
 import yfinance as yf
 
 from data_sources import enrich_info
-from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, market_index_for,
+from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, index_candidates_for,
                          sort_key, technical_precheck)
-from universes import UNIVERSES, fetch_universe
+from universes import (EUROPE_EXCHANGES, EXCHANGES, UNIVERSES, fetch_exchange,
+                       fetch_universe)
 
 st.set_page_config(page_title="Opportunità", page_icon="🎯", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -134,19 +135,24 @@ def error_result(ticker: str, reason: str) -> dict:
             "exclusions": [reason], "currency": "", "price": None}
 
 
-def analyze_with_history(ticker: str, hist, index_hist, fmp_key: str) -> dict:
+def analyze_with_history(ticker: str, hist, index_hist, index_symbol: str, fmp_key: str) -> dict:
     try:
         info = fetch_info(ticker, fmp_key)
         if info is None:
             return error_result(ticker, DOWNLOAD_FAILED)
-        return analyze(ticker, info, hist, index_hist, market_index_for(ticker))
+        return analyze(ticker, info, hist, index_hist, index_symbol)
     except Exception as e:
         return error_result(ticker, f"Dati non recuperabili: {e}")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def cached_index(symbol: str) -> pd.DataFrame:
-    return fetch_history(symbol)
+def cached_resolved_index(candidates: tuple):
+    """Primo indice della lista con storico sufficiente (nazionale, poi Euro Stoxx 50)."""
+    for symbol in candidates:
+        hist = fetch_history(symbol)
+        if not hist.empty and hist["Close"].dropna().shape[0] >= 221:
+            return symbol, hist
+    return candidates[0], pd.DataFrame()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -154,7 +160,16 @@ def cached_analysis(ticker: str, fmp_key: str) -> dict:
     hist = fetch_history(ticker)
     if hist.empty:
         return error_result(ticker, "Ticker non trovato o senza quotazioni su Yahoo Finance")
-    return analyze_with_history(ticker, hist, cached_index(market_index_for(ticker)), fmp_key)
+    symbol, index_hist = cached_resolved_index(tuple(index_candidates_for(ticker)))
+    return analyze_with_history(ticker, hist, index_hist, symbol, fmp_key)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_exchange(name: str, min_cap_eur_m: int):
+    try:
+        return fetch_exchange(name, min_cap_eur_m), None
+    except Exception as e:
+        return [], str(e)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -344,34 +359,61 @@ with tab_single:
         st.caption("Scrivi il nome dell'azienda o il ticker.")
 
 with tab_scan:
-    chosen = st.multiselect("Indici da scansionare", list(UNIVERSES),
-                            default=["FTSE MIB (Italia)", "S&P 500 (USA)"])
+    st.markdown("<div class='card-sub' style='margin-bottom:6px'>Borse europee: tutte le società "
+                "quotate sopra la capitalizzazione minima, lette da Yahoo Finance.</div>",
+                unsafe_allow_html=True)
+    all_europe = st.checkbox("Tutta l'Europa (16 borse)")
+    exchanges = st.multiselect("Borse europee", list(EXCHANGES), default=[],
+                               disabled=all_europe,
+                               placeholder="Scegli una o più borse")
+    min_cap = st.select_slider("Capitalizzazione minima (milioni di euro)",
+                               options=[250, 500, 1000, 2000, 5000], value=1000)
+    chosen = st.multiselect("Indici (USA e altri)", list(UNIVERSES),
+                            default=["S&P 500 (USA)"])
     extra = st.text_input("Altri ticker (facoltativo)",
                           placeholder="Separati da virgola, es. BC.MI, ASML.AS, NOVO-B.CO")
+    if all_europe:
+        st.caption("Tutta l'Europa con questa soglia richiede in genere da 5 a 15 minuti. "
+                   "Per provare, scegli prima due o tre borse.")
 
     if st.button("Scansiona"):
-        tickers, failed = [], []
+        tickers, failed, sources = [], [], {}
+        status = st.empty()
+        for name in (EUROPE_EXCHANGES if all_europe else exchanges):
+            status.caption(f"Leggo l'elenco di {name}…")
+            symbols, error = cached_exchange(name, min_cap)
+            if error or not symbols:
+                failed.append(name)
+            else:
+                sources[name] = len(symbols)
+            tickers += symbols
         for name in chosen:
+            status.caption(f"Leggo l'elenco {name}…")
             symbols, error = cached_universe(name)
             if error or not symbols:
                 failed.append(name)
+            else:
+                sources[name] = len(symbols)
             tickers += symbols
+        status.empty()
         tickers += [t.strip().upper() for t in extra.split(",") if t.strip()]
         tickers = list(dict.fromkeys(tickers))
         if failed:
             st.warning("Elenco non disponibile per: " + ", ".join(failed) +
-                       ". Riprova più tardi o aggiungi i ticker a mano.")
+                       ". Riprova tra qualche minuto, oppure aggiungi i ticker a mano.")
 
         if tickers:
             fmp_key = get_fmp_key()
-            index_map = {sym: cached_index(sym) for sym in {market_index_for(t) for t in tickers}}
+            groups = {tuple(index_candidates_for(t)) for t in tickers}
+            index_map = {g: cached_resolved_index(g) for g in groups}
             progress = st.progress(0.0, text=f"Passaggio 1 di 2: scarico i prezzi di {len(tickers)} titoli…")
             hists = bulk_history(tickers, on_progress=lambda done, total: progress.progress(
                 done / total * 0.5, text=f"Passaggio 1 di 2: prezzi scaricati per {done} di {total} titoli"))
 
             results, survivors = [], []
             for t in tickers:
-                reasons = technical_precheck(t, hists.get(t), index_map[market_index_for(t)])
+                idx_symbol, idx_hist = index_map[tuple(index_candidates_for(t))]
+                reasons = technical_precheck(t, hists.get(t), idx_hist, idx_symbol)
                 if reasons:
                     results.append(error_result(t, reasons[0]) | {"exclusions": reasons})
                 else:
@@ -380,14 +422,22 @@ with tab_scan:
             if survivors:
                 progress.progress(0.5, text=f"Passaggio 2 di 2: analizzo i fondamentali di {len(survivors)} titoli…")
                 with cf.ThreadPoolExecutor(max_workers=3) as pool:
-                    futures = [pool.submit(analyze_with_history, t, hists[t],
-                                           index_map[market_index_for(t)], fmp_key) for t in survivors]
+                    futures = []
+                    for t in survivors:
+                        idx_symbol, idx_hist = index_map[tuple(index_candidates_for(t))]
+                        futures.append(pool.submit(analyze_with_history, t, hists[t],
+                                                   idx_hist, idx_symbol, fmp_key))
                     for i, fut in enumerate(cf.as_completed(futures), start=1):
                         results.append(fut.result())
                         progress.progress(0.5 + 0.5 * i / len(survivors),
                                           text=f"Passaggio 2 di 2: {i} di {len(survivors)} titoli")
             progress.empty()
             st.session_state["scan_results"] = sorted(results, key=sort_key)
+            st.session_state["scan_sources"] = sources
+
+    sources = st.session_state.get("scan_sources")
+    if sources:
+        st.caption("Elenchi caricati: " + " · ".join(f"{k} {v}" for k, v in sources.items()))
 
     results = st.session_state.get("scan_results")
     if results:

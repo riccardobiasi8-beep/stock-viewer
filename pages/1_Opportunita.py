@@ -165,19 +165,40 @@ def cached_analysis(ticker: str, fmp_key: str) -> dict:
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
-def cached_exchange(name: str, min_cap_eur_m: int):
+def _exchange_ok(name: str, min_cap_eur_m: int):
+    # Solo l'elenco completo di Yahoo resta in memoria: il ripiego su Wikipedia no
+    return fetch_exchange(name, min_cap_eur_m, use_fallback=False)
+
+
+def load_exchange(name: str, min_cap_eur_m: int):
     try:
-        return fetch_exchange(name, min_cap_eur_m), None
+        symbols, source = _exchange_ok(name, min_cap_eur_m)
+        return symbols, source, None
     except Exception as e:
-        return [], str(e)
+        error = str(e)
+    fallback = EXCHANGES[name].get("fallback")
+    if fallback:
+        symbols, _, fb_error = load_universe(fallback)
+        if symbols:
+            return symbols, f"Wikipedia, solo {fallback.split(' (')[0]}", None
+        error += f" | Wikipedia: {fb_error}"
+    return [], None, error
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def cached_universe(name: str):
+def _universe_ok(name: str):
+    symbols = fetch_universe(name)
+    if not symbols:
+        raise RuntimeError("tabella dei titoli non trovata")
+    return symbols
+
+
+def load_universe(name: str):
+    """Gli errori non vengono memorizzati: al tentativo successivo si riprova davvero."""
     try:
-        return fetch_universe(name), None
+        return _universe_ok(name), "Wikipedia", None
     except Exception as e:
-        return [], str(e)
+        return [], None, f"{type(e).__name__}: {str(e)[:150]}"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -377,30 +398,28 @@ with tab_scan:
                    "Per provare, scegli prima due o tre borse.")
 
     if st.button("Scansiona"):
-        tickers, failed, sources = [], [], {}
+        tickers, failed, sources = [], {}, {}
         status = st.empty()
-        for name in (EUROPE_EXCHANGES if all_europe else exchanges):
+        jobs = [(n, lambda n=n: load_exchange(n, min_cap)) for n in (EUROPE_EXCHANGES if all_europe else exchanges)]
+        jobs += [(n, lambda n=n: load_universe(n)) for n in chosen]
+        for name, load in jobs:
             status.caption(f"Leggo l'elenco di {name}…")
-            symbols, error = cached_exchange(name, min_cap)
-            if error or not symbols:
-                failed.append(name)
+            symbols, source, error = load()
+            if symbols:
+                sources[name] = f"{len(symbols)}" + ("" if source == "Yahoo, borsa" else f" ({source})")
+                tickers += symbols
             else:
-                sources[name] = len(symbols)
-            tickers += symbols
-        for name in chosen:
-            status.caption(f"Leggo l'elenco {name}…")
-            symbols, error = cached_universe(name)
-            if error or not symbols:
-                failed.append(name)
-            else:
-                sources[name] = len(symbols)
-            tickers += symbols
+                failed[name] = error or "elenco vuoto"
         status.empty()
         tickers += [t.strip().upper() for t in extra.split(",") if t.strip()]
         tickers = list(dict.fromkeys(tickers))
         if failed:
             st.warning("Elenco non disponibile per: " + ", ".join(failed) +
                        ". Riprova tra qualche minuto, oppure aggiungi i ticker a mano.")
+            with st.expander("Dettagli tecnici dell'errore"):
+                for name, error in failed.items():
+                    st.markdown(f"<div class='reason'><b>{name}</b>: {error}</div>",
+                                unsafe_allow_html=True)
 
         if tickers:
             fmp_key = get_fmp_key()

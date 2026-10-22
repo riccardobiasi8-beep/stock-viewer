@@ -81,48 +81,38 @@ def fetch_universe(name: str):
 # ══════════════════════════════════════════════════════════════════════════════
 # fx = unità di valuta locale per 1 euro (approssimata): serve a tradurre la
 # capitalizzazione minima in euro nella valuta in cui Yahoo la esprime.
+# fallback = indice Wikipedia usato se lo screener di Yahoo non risponde.
 EXCHANGES = {
-    "Milano":                  {"codes": ["MIL"], "fx": 1.0},
-    "Francoforte (Xetra)":     {"codes": ["GER"], "fx": 1.0},
-    "Parigi":                  {"codes": ["PAR"], "fx": 1.0},
-    "Londra":                  {"codes": ["LSE"], "fx": 0.87},
-    "Amsterdam":               {"codes": ["AMS"], "fx": 1.0},
-    "Madrid":                  {"codes": ["MCE"], "fx": 1.0},
-    "Zurigo":                  {"codes": ["EBS"], "fx": 0.94},
-    "Bruxelles":               {"codes": ["BRU"], "fx": 1.0},
-    "Lisbona":                 {"codes": ["LIS"], "fx": 1.0},
-    "Vienna":                  {"codes": ["VIE"], "fx": 1.0},
-    "Dublino":                 {"codes": ["ISE"], "fx": 1.0},
-    "Stoccolma":               {"codes": ["STO"], "fx": 11.5},
-    "Copenaghen":              {"codes": ["CPH"], "fx": 7.46},
-    "Helsinki":                {"codes": ["HEL"], "fx": 1.0},
-    "Oslo":                    {"codes": ["OSL"], "fx": 11.7},
-    "Varsavia":                {"codes": ["WSE"], "fx": 4.3},
+    "Milano":              {"codes": ["MIL"], "region": "it", "suffix": ".MI", "fx": 1.0,  "fallback": "FTSE MIB (Italia)"},
+    "Francoforte (Xetra)": {"codes": ["GER"], "region": "de", "suffix": ".DE", "fx": 1.0,  "fallback": "DAX (Germania)"},
+    "Parigi":              {"codes": ["PAR"], "region": "fr", "suffix": ".PA", "fx": 1.0,  "fallback": "CAC 40 (Francia)"},
+    "Londra":              {"codes": ["LSE"], "region": "gb", "suffix": ".L",  "fx": 0.87, "fallback": "FTSE 100 (Regno Unito)"},
+    "Amsterdam":           {"codes": ["AMS"], "region": "nl", "suffix": ".AS", "fx": 1.0},
+    "Madrid":              {"codes": ["MCE"], "region": "es", "suffix": ".MC", "fx": 1.0},
+    "Zurigo":              {"codes": ["EBS"], "region": "ch", "suffix": ".SW", "fx": 0.94},
+    "Bruxelles":           {"codes": ["BRU"], "region": "be", "suffix": ".BR", "fx": 1.0},
+    "Lisbona":             {"codes": ["LIS"], "region": "pt", "suffix": ".LS", "fx": 1.0},
+    "Vienna":              {"codes": ["VIE"], "region": "at", "suffix": ".VI", "fx": 1.0},
+    "Dublino":             {"codes": ["ISE"], "region": "ie", "suffix": ".IR", "fx": 1.0},
+    "Stoccolma":           {"codes": ["STO"], "region": "se", "suffix": ".ST", "fx": 11.5},
+    "Copenaghen":          {"codes": ["CPH"], "region": "dk", "suffix": ".CO", "fx": 7.46},
+    "Helsinki":            {"codes": ["HEL"], "region": "fi", "suffix": ".HE", "fx": 1.0},
+    "Oslo":                {"codes": ["OSL"], "region": "no", "suffix": ".OL", "fx": 11.7},
+    "Varsavia":            {"codes": ["WSE"], "region": "pl", "suffix": ".WA", "fx": 4.3},
 }
 EUROPE_EXCHANGES = list(EXCHANGES)
 PAGE_SIZE = 250            # massimo consentito da Yahoo per richiesta
 
 
-def fetch_exchange(name: str, min_cap_eur_m: float = 1000, max_pages: int = 6, pause: float = 0.7):
-    """
-    Elenco dei titoli di una borsa con capitalizzazione sopra la soglia (milioni di euro).
-    Ordinati dal più grande al più piccolo. Solleva un errore se la prima richiesta fallisce.
-    """
+def _screen_symbols(query, sort_field, max_pages: int, pause: float):
     import yfinance as yf
-    from yfinance import EquityQuery
-
-    cfg = EXCHANGES[name]
-    floor = float(min_cap_eur_m) * 1e6 * cfg["fx"]
-    query = EquityQuery("and", [
-        EquityQuery("is-in", ["exchange", *cfg["codes"]]),
-        EquityQuery("gt", ["intradaymarketcap", floor]),
-    ])
-
     symbols = []
     for page in range(max_pages):
+        kwargs = {"offset": page * PAGE_SIZE, "size": PAGE_SIZE}
+        if sort_field:
+            kwargs.update(sortField=sort_field, sortAsc=False)
         try:
-            result = yf.screen(query, offset=page * PAGE_SIZE, size=PAGE_SIZE,
-                               sortField="intradaymarketcap", sortAsc=False)
+            result = yf.screen(query, **kwargs)
         except Exception:
             if page == 0:
                 raise
@@ -132,4 +122,45 @@ def fetch_exchange(name: str, min_cap_eur_m: float = 1000, max_pages: int = 6, p
         if len(quotes) < PAGE_SIZE:
             break
         time.sleep(pause)
-    return list(dict.fromkeys(symbols))
+    return symbols
+
+
+def fetch_exchange(name: str, min_cap_eur_m: float = 1000, max_pages: int = 6, pause: float = 0.7,
+                   use_fallback: bool = True):
+    """
+    Titoli di una borsa sopra la capitalizzazione minima (milioni di euro).
+    Prova più richieste a Yahoo, poi l'indice di Wikipedia. Restituisce (ticker, fonte).
+    Se tutto fallisce solleva RuntimeError con il dettaglio di ogni tentativo.
+    """
+    from yfinance import EquityQuery
+
+    cfg = EXCHANGES[name]
+    cap = EquityQuery("gt", ["intradaymarketcap", float(min_cap_eur_m) * 1e6 * cfg["fx"]])
+    region = EquityQuery("eq", ["region", cfg["region"]])
+    exchange = EquityQuery("is-in", ["exchange", *cfg["codes"]])
+    attempts = [
+        ("Yahoo, borsa", EquityQuery("and", [region, exchange, cap]), "intradaymarketcap"),
+        ("Yahoo, paese", EquityQuery("and", [region, cap]), "intradaymarketcap"),
+        ("Yahoo, paese", EquityQuery("and", [region, cap]), None),
+    ]
+    errors = []
+    for label, query, sort_field in attempts:
+        try:
+            symbols = [s for s in _screen_symbols(query, sort_field, max_pages, pause)
+                       if s.endswith(cfg["suffix"])]
+        except Exception as e:
+            errors.append(f"{label}: {type(e).__name__}: {str(e)[:150]}")
+            continue
+        if symbols:
+            return list(dict.fromkeys(symbols)), label
+        errors.append(f"{label}: elenco vuoto")
+
+    if use_fallback and cfg.get("fallback"):
+        try:
+            symbols = fetch_universe(cfg["fallback"])
+            if symbols:
+                return symbols, f"Wikipedia, solo {cfg['fallback'].split(' (')[0]}"
+            errors.append("Wikipedia: elenco vuoto")
+        except Exception as e:
+            errors.append(f"Wikipedia: {type(e).__name__}: {str(e)[:150]}")
+    raise RuntimeError(" | ".join(errors))

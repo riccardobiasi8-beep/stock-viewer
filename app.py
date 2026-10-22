@@ -187,6 +187,7 @@ def search_tickers(query: str) -> list:
 # ── App ───────────────────────────────────────────────────────────────────────
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 st.markdown("## 📈 Stock Viewer")
+st.page_link("pages/1_Opportunita.py", label="Cerca opportunità di trading", icon="🎯")
 
 # Session state
 if "ticker" not in st.session_state:
@@ -304,7 +305,7 @@ if ticker:
         legend=dict(x=0, y=1, bgcolor="rgba(0,0,0,0)", font_color="#8e8e93"),
         font_color="#8e8e93",
     )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
     tab1, tab2, tab3, tab4 = st.tabs(["Panoramica", "Fondamentali", "Tecnica", "Bilanci"])
@@ -513,7 +514,7 @@ if ticker:
                               f"{x/1e6:.1f}M" if pd.notna(x) and abs(x) >= 1e6 else
                               (f"{x:.0f}" if pd.notna(x) else "N/A")
                 )
-            st.dataframe(df_d.head(20), use_container_width=True)
+            st.dataframe(df_d.head(20), width="stretch")
 
         show_df(fins.get("income"), "Conto Economico (annuale)")
         show_df(fins.get("balance"), "Stato Patrimoniale")

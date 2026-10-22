@@ -79,6 +79,13 @@ FX_TO_EUR_APPROX = {
     "SEK": 0.087, "NOK": 0.085, "DKK": 0.134,
 }
 
+CURRENCY_BY_SUFFIX = {
+    ".MI": "EUR", ".DE": "EUR", ".F": "EUR", ".PA": "EUR", ".AS": "EUR", ".MC": "EUR",
+    ".BR": "EUR", ".LS": "EUR", ".VI": "EUR", ".HE": "EUR", ".IR": "EUR",
+    ".L": "GBp", ".SW": "CHF", ".T": "JPY", ".HK": "HKD", ".TO": "CAD",
+    ".KS": "KRW", ".AX": "AUD",
+}
+
 VERDICT_LABELS = {
     "valido": "Setup valido",
     "osservazione": "Da tenere d'occhio",
@@ -114,6 +121,21 @@ def market_index_for(ticker: str) -> str:
         return "^GSPC"
     suffix = "." + ticker.rsplit(".", 1)[1].upper()
     return INDEX_BY_SUFFIX.get(suffix, "^GSPC")
+
+
+def guess_currency(ticker: str) -> str:
+    if "." not in ticker:
+        return "USD"
+    return CURRENCY_BY_SUFFIX.get("." + ticker.rsplit(".", 1)[1].upper(), "USD")
+
+
+def history_problem(hist) -> str:
+    """Messaggio chiaro quando lo storico non basta."""
+    if hist is None or hist.empty or hist["Close"].dropna().empty:
+        return "Ticker non trovato o senza quotazioni su Yahoo Finance"
+    sessions = int(hist["Close"].dropna().shape[0])
+    return (f"Storico troppo corto: {sessions} sedute, ne servono almeno {MIN_HISTORY} "
+            "(titolo quotato da poco?)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -485,7 +507,7 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
 
     ind = compute_indicators(hist)
     if ind is None:
-        result["exclusions"].append("Storico prezzi insufficiente (servono circa 13 mesi di sedute)")
+        result["exclusions"].append(history_problem(hist))
         return result
     result["price"] = round(ind["price"], 2)
 
@@ -551,6 +573,30 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
         result["exclusions"].append(f"Punteggio complessivo {composite:.0f} sotto la soglia di {WATCH_THRESHOLD}")
     result["verdict_label"] = VERDICT_LABELS[result["verdict"]]
     return result
+
+
+def technical_precheck(ticker: str, hist, index_hist, index_symbol: str | None = None,
+                       today: pd.Timestamp | None = None) -> list:
+    """
+    Primo passaggio veloce della scansione, senza fondamentali.
+    Restituisce i motivi di esclusione: lista vuota = il titolo passa al secondo passaggio.
+    Usa solo controlli che i fondamentali non possono ribaltare.
+    """
+    today = (today or pd.Timestamp.today()).normalize()
+    ind = compute_indicators(hist)
+    if ind is None:
+        return [history_problem(hist)]
+    exclusions = []
+    liquidity_eur = ind["liquidity"] * FX_TO_EUR_APPROX.get(guess_currency(ticker), 1.0)
+    if liquidity_eur < MIN_LIQUIDITY_EUR:
+        exclusions.append("Scambi troppo bassi per entrare e uscire velocemente dal titolo")
+    exclusions += chart_layer(ind)["exclusions"]
+    exclusions += trend_layer(ind, index_hist, index_symbol or market_index_for(ticker))["exclusions"]
+    # Senza il target degli analisti il target può solo essere più alto:
+    # se il rendimento/rischio non basta adesso, non basterà nemmeno dopo.
+    plan = trade_plan(ind, {}, today)
+    exclusions += [e for e in plan["exclusions"] if not e.startswith("Tempo stimato")]
+    return exclusions
 
 
 def sort_key(result: dict):

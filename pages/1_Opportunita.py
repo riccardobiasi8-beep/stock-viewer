@@ -1,4 +1,6 @@
 import concurrent.futures as cf
+import re
+from collections import Counter
 
 import pandas as pd
 import streamlit as st
@@ -6,7 +8,8 @@ import yfinance as yf
 
 from data_sources import enrich_info
 from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, market_index_for,
-                         sort_key)
+                         sort_key, technical_precheck)
+from universes import UNIVERSES, fetch_universe
 
 st.set_page_config(page_title="Opportunità", page_icon="🎯", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -42,19 +45,12 @@ html, body, [data-testid="stAppViewContainer"] { background: #000; color: #f5f5f
 
 VERDICT_COLORS = {"valido": "#30d158", "osservazione": "#ff9f0a", "scartato": "#ff453a"}
 
-DEFAULT_LIST = (
-    "AAPL, MSFT, GOOGL, AMZN, META, NVDA, JPM, V, JNJ, PG, KO, XOM, CVX, PFE, CSCO, ORCL, MCD, NKE,\n"
-    "ENI.MI, ENEL.MI, ISP.MI, UCG.MI, STLAM.MI, RACE.MI, G.MI, PST.MI, LDO.MI,\n"
-    "SAP.DE, SIE.DE, ALV.DE, BAS.DE, BMW.DE, DTE.DE,\n"
-    "MC.PA, TTE.PA, BNP.PA, SAN.PA, AIR.PA"
-)
 
 
 # ── Dati ──────────────────────────────────────────────────────────────────────
-def fetch_ticker(ticker: str, fmp_key: str):
+def fetch_info(ticker: str, fmp_key: str) -> dict:
     """Nessuna chiamata Streamlit qui: la funzione gira anche nei thread."""
     t = yf.Ticker(ticker)
-    hist = t.history(period="2y", auto_adjust=True)
     try:
         info = t.info or {}
     except Exception:
@@ -64,35 +60,87 @@ def fetch_ticker(ticker: str, fmp_key: str):
             info = enrich_info(t, ticker, info, fmp_key)
         except Exception as e:
             print(f"[Opportunità] enrich {ticker}: {e}")
-    return info, hist
+    return info
 
 
-def fetch_index(symbol: str) -> pd.DataFrame:
+def fetch_history(ticker: str) -> pd.DataFrame:
     try:
-        return yf.Ticker(symbol).history(period="2y", auto_adjust=True)
+        return yf.Ticker(ticker).history(period="2y", auto_adjust=True)
     except Exception:
         return pd.DataFrame()
 
 
-def analyze_ticker(ticker: str, index_hist: pd.DataFrame, fmp_key: str) -> dict:
+def bulk_history(tickers, chunk=100, on_progress=None) -> dict:
+    """Scarica lo storico di molti titoli con poche richieste."""
+    out = {}
+    for start in range(0, len(tickers), chunk):
+        batch = tickers[start:start + chunk]
+        try:
+            df = yf.download(batch, period="2y", auto_adjust=True, group_by="ticker",
+                             threads=True, progress=False)
+        except Exception as e:
+            print(f"[Opportunità] download: {e}")
+            df = None
+        for t in batch:
+            h = None
+            if df is not None and not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    if t in df.columns.get_level_values(0):
+                        h = df[t]
+                elif len(batch) == 1:
+                    h = df
+            out[t] = h.dropna(how="all") if h is not None else pd.DataFrame()
+        if on_progress:
+            on_progress(min(start + chunk, len(tickers)), len(tickers))
+    return out
+
+
+def error_result(ticker: str, reason: str) -> dict:
+    return {"ticker": ticker, "name": ticker, "verdict": "scartato",
+            "verdict_label": "Scartato", "composite": None, "plan": None,
+            "scores": {}, "labels": {}, "details": {}, "warnings": [],
+            "exclusions": [reason], "currency": "", "price": None}
+
+
+def analyze_with_history(ticker: str, hist, index_hist, fmp_key: str) -> dict:
     try:
-        info, hist = fetch_ticker(ticker, fmp_key)
+        info = fetch_info(ticker, fmp_key)
         return analyze(ticker, info, hist, index_hist, market_index_for(ticker))
     except Exception as e:
-        return {"ticker": ticker, "name": ticker, "verdict": "scartato",
-                "verdict_label": "Scartato", "composite": None, "plan": None,
-                "scores": {}, "labels": {}, "details": {}, "warnings": [],
-                "exclusions": [f"Dati non recuperabili: {e}"], "currency": "", "price": None}
+        return error_result(ticker, f"Dati non recuperabili: {e}")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_index(symbol: str) -> pd.DataFrame:
-    return fetch_index(symbol)
+    return fetch_history(symbol)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_analysis(ticker: str, fmp_key: str) -> dict:
-    return analyze_ticker(ticker, cached_index(market_index_for(ticker)), fmp_key)
+    hist = fetch_history(ticker)
+    if hist.empty:
+        return error_result(ticker, "Ticker non trovato o senza quotazioni su Yahoo Finance")
+    return analyze_with_history(ticker, hist, cached_index(market_index_for(ticker)), fmp_key)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def cached_universe(name: str):
+    try:
+        return fetch_universe(name), None
+    except Exception as e:
+        return [], str(e)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_companies(query: str):
+    try:
+        quotes = getattr(yf.Search(query, max_results=10), "quotes", []) or []
+    except Exception:
+        return []
+    return [{"symbol": q["symbol"],
+             "name": q.get("shortname") or q.get("longname") or q["symbol"],
+             "exchange": q.get("exchDisp") or q.get("exchange") or ""}
+            for q in quotes if q.get("symbol") and q.get("quoteType") == "EQUITY"]
 
 
 def get_fmp_key() -> str:
@@ -132,10 +180,12 @@ def render_result(r: dict):
     cur = r.get("currency", "")
     color = VERDICT_COLORS.get(r["verdict"], "#8e8e93")
     composite = f"Punteggio {r['composite']:.0f}/100" if r.get("composite") is not None else ""
+    price_html = (f"<div style='font-size:2.2rem;font-weight:700;line-height:1.2'>{money(r['price'], cur)}</div>"
+                  if r.get("price") is not None else "")
     st.markdown(f"""
     <div style='margin-top:8px'>
       <div style='color:#8e8e93;font-size:0.9rem'>{r['ticker']} — {r['name']}</div>
-      <div style='font-size:2.2rem;font-weight:700;line-height:1.2'>{money(r.get('price'), cur)}</div>
+      {price_html}
       <div style='margin-top:8px'>
         <span class='pill' style='background:{color}22;color:{color};border:1px solid {color}66'>{r['verdict_label']}</span>
         <span style='color:#8e8e93;font-size:0.85rem;margin-left:8px'>{composite}</span>
@@ -231,35 +281,79 @@ st.markdown(
     f"per operazioni da 1 a {HORIZON_MAX_DAYS // 21} mesi.</div>",
     unsafe_allow_html=True)
 
-tab_single, tab_scan = st.tabs(["Analizza un titolo", "Scansiona una lista"])
+tab_single, tab_scan = st.tabs(["Analizza un titolo", "Scansiona gli indici"])
 
 with tab_single:
-    ticker = st.text_input("Ticker", placeholder="Es. ENI.MI, AAPL, SAP.DE",
-                           label_visibility="collapsed").strip().upper()
-    if ticker:
-        with st.spinner(f"Analizzo {ticker}…"):
-            render_result(cached_analysis(ticker, get_fmp_key()))
+    query = st.text_input("Titolo", placeholder="Nome o ticker: Apple, Leonardo, AAPL, ENI.MI…",
+                          label_visibility="collapsed").strip()
+    ticker = None
+    if query:
+        looks_like_ticker = " " not in query and query == query.upper() and len(query) <= 12
+        result = cached_analysis(query, get_fmp_key()) if looks_like_ticker else None
+        not_found = result is not None and result.get("price") is None and \
+            result["exclusions"][:1] == ["Ticker non trovato o senza quotazioni su Yahoo Finance"]
+        if result is not None and not not_found:
+            render_result(result)
+        else:
+            matches = search_companies(query)
+            if matches:
+                labels = [f"{m['name']} — {m['symbol']}" + (f" ({m['exchange']})" if m["exchange"] else "")
+                          for m in matches]
+                choice = st.selectbox("Scegli il titolo", labels)
+                ticker = matches[labels.index(choice)]["symbol"]
+                with st.spinner(f"Analizzo {ticker}…"):
+                    render_result(cached_analysis(ticker, get_fmp_key()))
+            else:
+                st.caption("Nessun titolo trovato. Prova con il nome dell'azienda o con il ticker "
+                           "completo di borsa, per esempio AAPL o ENI.MI.")
     else:
-        st.caption("Scrivi il ticker esatto, con il suffisso della borsa per i titoli non americani.")
+        st.caption("Scrivi il nome dell'azienda o il ticker.")
 
 with tab_scan:
-    raw_list = st.text_area("Titoli da analizzare", value=DEFAULT_LIST, height=130,
-                            help="Ticker separati da virgola o a capo")
+    chosen = st.multiselect("Indici da scansionare", list(UNIVERSES),
+                            default=["FTSE MIB (Italia)", "S&P 500 (USA)"])
+    extra = st.text_input("Altri ticker (facoltativo)",
+                          placeholder="Separati da virgola, es. BC.MI, ASML.AS, NOVO-B.CO")
+
     if st.button("Scansiona"):
-        tickers = list(dict.fromkeys(
-            t.strip().upper() for t in raw_list.replace("\n", ",").split(",") if t.strip()))
-        fmp_key = get_fmp_key()
-        index_map = {sym: cached_index(sym) for sym in {market_index_for(t) for t in tickers}}
-        progress = st.progress(0.0, text=f"Analizzo {len(tickers)} titoli…")
-        results = []
-        with cf.ThreadPoolExecutor(max_workers=6) as pool:
-            futures = [pool.submit(analyze_ticker, t, index_map[market_index_for(t)], fmp_key)
-                       for t in tickers]
-            for i, fut in enumerate(cf.as_completed(futures), start=1):
-                results.append(fut.result())
-                progress.progress(i / len(tickers), text=f"Analizzati {i} di {len(tickers)}")
-        progress.empty()
-        st.session_state["scan_results"] = sorted(results, key=sort_key)
+        tickers, failed = [], []
+        for name in chosen:
+            symbols, error = cached_universe(name)
+            if error or not symbols:
+                failed.append(name)
+            tickers += symbols
+        tickers += [t.strip().upper() for t in extra.split(",") if t.strip()]
+        tickers = list(dict.fromkeys(tickers))
+        if failed:
+            st.warning("Elenco non disponibile per: " + ", ".join(failed) +
+                       ". Riprova più tardi o aggiungi i ticker a mano.")
+
+        if tickers:
+            fmp_key = get_fmp_key()
+            index_map = {sym: cached_index(sym) for sym in {market_index_for(t) for t in tickers}}
+            progress = st.progress(0.0, text=f"Passaggio 1 di 2: scarico i prezzi di {len(tickers)} titoli…")
+            hists = bulk_history(tickers, on_progress=lambda done, total: progress.progress(
+                done / total * 0.5, text=f"Passaggio 1 di 2: prezzi scaricati per {done} di {total} titoli"))
+
+            results, survivors = [], []
+            for t in tickers:
+                reasons = technical_precheck(t, hists.get(t), index_map[market_index_for(t)])
+                if reasons:
+                    results.append(error_result(t, reasons[0]) | {"exclusions": reasons})
+                else:
+                    survivors.append(t)
+
+            if survivors:
+                progress.progress(0.5, text=f"Passaggio 2 di 2: analizzo i fondamentali di {len(survivors)} titoli…")
+                with cf.ThreadPoolExecutor(max_workers=6) as pool:
+                    futures = [pool.submit(analyze_with_history, t, hists[t],
+                                           index_map[market_index_for(t)], fmp_key) for t in survivors]
+                    for i, fut in enumerate(cf.as_completed(futures), start=1):
+                        results.append(fut.result())
+                        progress.progress(0.5 + 0.5 * i / len(survivors),
+                                          text=f"Passaggio 2 di 2: {i} di {len(survivors)} titoli")
+            progress.empty()
+            st.session_state["scan_results"] = sorted(results, key=sort_key)
 
     results = st.session_state.get("scan_results")
     if results:
@@ -270,6 +364,7 @@ with tab_scan:
         if selected:
             table = pd.DataFrame([{
                 "Titolo": r["ticker"],
+                "Nome": (r["name"] or "")[:28],
                 "Esito": r["verdict_label"],
                 "Punteggio": r["composite"],
                 "Entrata": r["plan"]["entry"],
@@ -288,17 +383,21 @@ with tab_scan:
                 "Netto %": st.column_config.NumberColumn(format="%+.2f"),
                 "R/R": st.column_config.NumberColumn(format="%.1f"),
             })
-            choice = st.selectbox("Vedi il dettaglio", [r["ticker"] for r in selected])
-            render_result(next(r for r in selected if r["ticker"] == choice))
+            choice = st.selectbox("Vedi il dettaglio", [f"{r['ticker']} — {r['name']}" for r in selected])
+            render_result(selected[[f"{r['ticker']} — {r['name']}" for r in selected].index(choice)])
         else:
-            st.caption("Nessun titolo della lista supera i filtri in questo momento.")
+            st.caption("Nessun titolo supera i filtri in questo momento.")
 
         if rejected:
-            with st.expander(f"Scartati ({len(rejected)})"):
-                for r in rejected:
-                    reason = r["exclusions"][0] if r.get("exclusions") else "—"
-                    st.markdown(f"<div class='reason'><b>{r['ticker']}</b> — {reason}</div>",
-                                unsafe_allow_html=True)
+            with st.expander(f"Scartati ({len(rejected)}): motivi principali"):
+                main_reasons = Counter(re.sub(r"[-+]?\d[\d.,]*", "…", r["exclusions"][0])
+                                       for r in rejected if r.get("exclusions"))
+                st.dataframe(pd.DataFrame(main_reasons.most_common(), columns=["Motivo", "Titoli"]),
+                             hide_index=True, width="stretch")
+                st.dataframe(pd.DataFrame([{"Titolo": r["ticker"],
+                                            "Motivo": r["exclusions"][0] if r.get("exclusions") else "—"}
+                                           for r in rejected]),
+                             hide_index=True, width="stretch")
 
 st.markdown(
     "<div class='card-sub' style='margin-top:32px'>Stime basate sui dati storici, non garanzie. "

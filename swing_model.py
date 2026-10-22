@@ -36,6 +36,8 @@ BASE_WINDOW = 40                # sedute usate per definire la base recente
 MIN_HISTORY = 260               # sedute minime di storico (~13 mesi)
 MIN_LIQUIDITY_EUR = 500_000     # controvalore medio giornaliero minimo
 EARNINGS_WARNING_DAYS = 14      # avviso se la trimestrale è entro 14 giorni
+SLOPE_FLAT_PCT = 0.3            # media 150 gg 'piatta' se varia meno dello 0,3% in 20 sedute
+NEAR_HIGH_PCT = 0.95            # 'vicino ai massimi' = entro il 5% dal massimo a 52 settimane
 WEIGHTS = {"fundamentals": 0.30, "trend": 0.30, "chart": 0.40}
 VALID_THRESHOLD = 65
 WATCH_THRESHOLD = 50
@@ -330,7 +332,7 @@ def trend_layer(ind: dict, index_hist, index_symbol: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # LIVELLO 3 — GRAFICO (stadi di Weinstein)
 # ══════════════════════════════════════════════════════════════════════════════
-def weinstein_stage(close: pd.Series, ma150: pd.Series):
+def weinstein_stage(close: pd.Series, ma150: pd.Series, high_52w: float | None = None):
     """Stadio 1 base, 2 rialzo, 3 distribuzione, 4 declino."""
     if ma150.dropna().shape[0] < 101:
         return None
@@ -339,23 +341,27 @@ def weinstein_stage(close: pd.Series, ma150: pd.Series):
     slope = (ma_now / float(ma150.iloc[-21]) - 1) * 100      # % su 20 sedute
     distance = (price / ma_now - 1) * 100
     came_from_decline = ma_now < float(ma150.iloc[-101])
+    near_high = high_52w is not None and price >= high_52w * NEAR_HIGH_PCT
+    rising, falling = slope > SLOPE_FLAT_PCT, slope < -SLOPE_FLAT_PCT
 
-    if price > ma_now and slope > 1.0:
+    if price > ma_now and rising:
         if distance <= 12:
             code, label, score = "2-iniziale", "Stadio 2 iniziale: rialzo appena partito", 100
         elif distance <= 20:
             code, label, score = "2-in-corso", "Stadio 2: rialzo in corso", 80
         else:
             code, label, score = "2-esteso", "Stadio 2 esteso: prezzo lontano dalla media", 45
-    elif price < ma_now and slope < -1.0:
+    elif price < ma_now and falling:
         code, label, score = "4", "Stadio 4: declino", 0
     elif price > ma_now:
         if came_from_decline:
             code, label, score = "1-uscita", "Stadio 1 in uscita: sta rompendo la base", 75
+        elif near_high:
+            code, label, score = "2-pausa", "Stadio 2 in pausa: media piatta ma prezzo vicino ai massimi", 70
         else:
             code, label, score = "3", "Stadio 3: distribuzione, il rialzo si sta esaurendo", 20
     else:
-        if slope > 1.0:
+        if rising:
             code, label, score = "2-correzione", "Stadio 2 in correzione", 40
         elif came_from_decline:
             code, label, score = "1-base", "Stadio 1: base laterale dopo un calo", 55
@@ -369,7 +375,7 @@ def weinstein_stage(close: pd.Series, ma150: pd.Series):
 def chart_layer(ind: dict) -> dict:
     out = {"score": None, "stage": None, "stage_label": "Non calcolabile",
            "exclusions": [], "warnings": []}
-    stage = weinstein_stage(ind["close"], ind["ma150_series"])
+    stage = weinstein_stage(ind["close"], ind["ma150_series"], ind["high_52w"])
     if stage is None:
         out["exclusions"].append("Storico insufficiente per determinare la fase del grafico")
         return out

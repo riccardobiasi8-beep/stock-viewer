@@ -4,6 +4,7 @@ Nessuna dipendenza da Streamlit: si può testare da solo.
 """
 import io
 import re
+import time
 
 import pandas as pd
 import requests
@@ -73,3 +74,62 @@ def fetch_universe(name: str):
     response = requests.get(cfg["url"], headers=HEADERS, timeout=20)
     response.raise_for_status()
     return parse_constituents(response.text, cfg["columns"], cfg["suffix"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BORSE INTERE — tutte le società quotate, lette dallo screener di Yahoo Finance
+# ══════════════════════════════════════════════════════════════════════════════
+# fx = unità di valuta locale per 1 euro (approssimata): serve a tradurre la
+# capitalizzazione minima in euro nella valuta in cui Yahoo la esprime.
+EXCHANGES = {
+    "Milano":                  {"codes": ["MIL"], "fx": 1.0},
+    "Francoforte (Xetra)":     {"codes": ["GER"], "fx": 1.0},
+    "Parigi":                  {"codes": ["PAR"], "fx": 1.0},
+    "Londra":                  {"codes": ["LSE"], "fx": 0.87},
+    "Amsterdam":               {"codes": ["AMS"], "fx": 1.0},
+    "Madrid":                  {"codes": ["MCE"], "fx": 1.0},
+    "Zurigo":                  {"codes": ["EBS"], "fx": 0.94},
+    "Bruxelles":               {"codes": ["BRU"], "fx": 1.0},
+    "Lisbona":                 {"codes": ["LIS"], "fx": 1.0},
+    "Vienna":                  {"codes": ["VIE"], "fx": 1.0},
+    "Dublino":                 {"codes": ["ISE"], "fx": 1.0},
+    "Stoccolma":               {"codes": ["STO"], "fx": 11.5},
+    "Copenaghen":              {"codes": ["CPH"], "fx": 7.46},
+    "Helsinki":                {"codes": ["HEL"], "fx": 1.0},
+    "Oslo":                    {"codes": ["OSL"], "fx": 11.7},
+    "Varsavia":                {"codes": ["WSE"], "fx": 4.3},
+}
+EUROPE_EXCHANGES = list(EXCHANGES)
+PAGE_SIZE = 250            # massimo consentito da Yahoo per richiesta
+
+
+def fetch_exchange(name: str, min_cap_eur_m: float = 1000, max_pages: int = 6, pause: float = 0.7):
+    """
+    Elenco dei titoli di una borsa con capitalizzazione sopra la soglia (milioni di euro).
+    Ordinati dal più grande al più piccolo. Solleva un errore se la prima richiesta fallisce.
+    """
+    import yfinance as yf
+    from yfinance import EquityQuery
+
+    cfg = EXCHANGES[name]
+    floor = float(min_cap_eur_m) * 1e6 * cfg["fx"]
+    query = EquityQuery("and", [
+        EquityQuery("is-in", ["exchange", *cfg["codes"]]),
+        EquityQuery("gt", ["intradaymarketcap", floor]),
+    ])
+
+    symbols = []
+    for page in range(max_pages):
+        try:
+            result = yf.screen(query, offset=page * PAGE_SIZE, size=PAGE_SIZE,
+                               sortField="intradaymarketcap", sortAsc=False)
+        except Exception:
+            if page == 0:
+                raise
+            break                                   # pagine successive: teniamo quello che abbiamo
+        quotes = result.get("quotes", []) if isinstance(result, dict) else []
+        symbols += [q["symbol"].strip().upper() for q in quotes if q.get("symbol")]
+        if len(quotes) < PAGE_SIZE:
+            break
+        time.sleep(pause)
+    return list(dict.fromkeys(symbols))

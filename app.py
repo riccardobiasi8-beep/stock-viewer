@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 # ── Stile condiviso in stile Apple (ui.py) ─────────────────────────────────────
-from ui import apply_style
+from ui import CHART_DOWN, CHART_UP, GREEN, LABEL2, LABEL3, RED, SEPARATOR, apply_style
 apply_style()
 
 
@@ -168,7 +168,7 @@ if search_query and len(search_query) >= 2:
         with st.spinner("Ricerca..."):
             results = search_tickers(search_query)
         if results:
-            st.markdown("<div style='margin-bottom:8px;font-size:0.8rem;color:#8e8e93'>Seleziona un titolo:</div>", unsafe_allow_html=True)
+            st.markdown("<div style='margin-bottom:8px;font-size:0.8rem;color:#6E6E73'>Seleziona un titolo:</div>", unsafe_allow_html=True)
             cols = st.columns(2)
             for i, r in enumerate(results[:6]):
                 with cols[i % 2]:
@@ -187,14 +187,13 @@ if search_query and len(search_query) >= 2:
 # Period selector
 ticker = st.session_state.ticker
 if ticker:
-    p_cols = st.columns(7)
-    periods = {"1S": "5d", "1M": "1mo", "3M": "3mo",
-               "6M": "6mo", "1A": "1y", "2A": "2y", "5A": "5y"}
-    for i, (label, val) in enumerate(periods.items()):
-        with p_cols[i]:
-            if st.button(label, key=f"p_{val}"):
-                st.session_state.period = val
-                st.rerun()
+    periods = {"1S": "5d", "1M": "1mo", "3M": "3mo", "6M": "6mo", "1A": "1y", "2A": "2y", "5A": "5y"}
+    labels = {v: k for k, v in periods.items()}
+    if "period_seg" not in st.session_state:
+        st.session_state.period_seg = labels.get(st.session_state.period, "1A")
+    chosen = st.segmented_control("Periodo", list(periods), key="period_seg", required=True,
+                                  label_visibility="collapsed")
+    st.session_state.period = periods.get(chosen or "1A", "1y")
 
 # ── Load & display ────────────────────────────────────────────────────────────
 if ticker:
@@ -221,47 +220,44 @@ if ticker:
     exchange = info.get("exchange", "")
     sector = info.get("sector", "")
     industry = info.get("industry", "")
-    change_color = "#30d158" if change >= 0 else "#ff453a"
+    change_color = GREEN if change >= 0 else RED
     sign = "+" if change >= 0 else ""
 
-    st.markdown(f"""
-    <div class="company-name">
-        <span class="ticker-badge">{ticker}</span>
-        {'<span class="ticker-badge">' + exchange + '</span>' if exchange else ''}
-        {name}
-    </div>
-    <div class="price-main">{fmt_num(cur_price, 2)} <span style='font-size:1rem;color:#8e8e93'>{currency}</span></div>
-    <div style="font-size:1rem;font-weight:500;color:{change_color};margin-top:4px">
-        {sign}{fmt_num(change, 2)} ({sign}{fmt_num(change_pct, 2)}%)
-        <span style="color:#8e8e93;font-size:0.8rem"> oggi</span>
-    </div>
-    {'<div style="font-size:0.8rem;color:#8e8e93;margin-top:4px">' + sector + (' · ' + industry if industry else '') + '</div>' if sector else ''}
-    <div style="height:16px"></div>
-    """, unsafe_allow_html=True)
+    exchange_chip = f'<span class="ticker-badge">{exchange}</span>' if exchange else ""
+    sector_line = (f'<div style="font-size:13px;color:{LABEL2};margin-top:6px">{sector}'
+                   + (f' · {industry}' if industry else '') + '</div>') if sector else ""
+    st.markdown(
+        f'<div class="ios-card">'
+        f'<div class="company-name"><span class="ticker-badge">{ticker}</span>{exchange_chip}{name}</div>'
+        f'<div class="price-main">{fmt_num(cur_price, 2)} <span style="font-size:17px;color:{LABEL2};font-weight:500">{currency}</span></div>'
+        f'<div style="font-size:17px;font-weight:600;color:{change_color};margin-top:4px">'
+        f'{sign}{fmt_num(change, 2)} ({sign}{fmt_num(change_pct, 2)}%)'
+        f'<span style="color:{LABEL2};font-size:13px;font-weight:400"> oggi</span></div>'
+        f'{sector_line}</div>', unsafe_allow_html=True)
 
     # ── Chart ─────────────────────────────────────────────────────────────────
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=hist.index, open=hist["Open"], high=hist["High"],
         low=hist["Low"], close=hist["Close"],
-        increasing_line_color="#30d158", decreasing_line_color="#ff453a",
+        increasing_line_color=CHART_UP, decreasing_line_color=CHART_DOWN,
         name="Prezzo"
     ))
     fig.add_trace(go.Bar(
         x=hist.index, y=hist["Volume"],
-        marker_color=["#30d158" if c >= o else "#ff453a"
+        marker_color=[CHART_UP if c >= o else CHART_DOWN
                       for c, o in zip(hist["Close"], hist["Open"])],
         opacity=0.25, name="Volume", yaxis="y2"
     ))
     fig.update_layout(
-        paper_bgcolor="#000", plot_bgcolor="#000",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=0, r=0, t=0, b=0), height=300,
-        xaxis=dict(showgrid=False, color="#8e8e93", rangeslider_visible=False),
-        yaxis=dict(showgrid=True, gridcolor="#1c1c1e", color="#8e8e93", side="right"),
+        xaxis=dict(showgrid=False, color=LABEL2, rangeslider_visible=False),
+        yaxis=dict(showgrid=True, gridcolor=SEPARATOR, color=LABEL2, side="right"),
         yaxis2=dict(overlaying="y", side="left", showgrid=False,
                     showticklabels=False, range=[0, hist["Volume"].max() * 5]),
-        legend=dict(x=0, y=1, bgcolor="rgba(0,0,0,0)", font_color="#8e8e93"),
-        font_color="#8e8e93",
+        legend=dict(x=0, y=1, bgcolor="rgba(0,0,0,0)", font_color=LABEL2),
+        font_color=LABEL2,
     )
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
@@ -300,7 +296,7 @@ if ticker:
         desc = info.get('longBusinessSummary')
         if desc:
             st.markdown("<div class='section-header'>Descrizione</div>", unsafe_allow_html=True)
-            st.markdown(f"<p style='color:#8e8e93;font-size:0.85rem;line-height:1.6'>{desc[:600]}{'...' if len(desc)>600 else ''}</p>", unsafe_allow_html=True)
+            st.markdown(f"<p style='color:#6E6E73;font-size:0.85rem;line-height:1.6'>{desc[:600]}{'...' if len(desc)>600 else ''}</p>", unsafe_allow_html=True)
 
     # ── TAB 2: Fondamentali ───────────────────────────────────────────────────
     with tab2:
@@ -409,7 +405,7 @@ if ticker:
         def vs(ind):
             if not ind or ind != ind: return ""
             d = (cur_price - ind) / ind * 100
-            c = "#30d158" if d >= 0 else "#ff453a"
+            c = GREEN if d >= 0 else RED
             s = "+" if d >= 0 else ""
             return f" <small style='color:{c}'>{s}{d:.1f}%</small>"
 
@@ -481,12 +477,12 @@ if ticker:
 else:
     # Empty state
     st.markdown("""
-    <div style='text-align:center;padding:60px 20px;color:#48484a'>
+    <div style='text-align:center;padding:60px 20px;color:#8E8E93'>
         <div style='font-size:3rem'>📈</div>
-        <div style='font-size:1.1rem;font-weight:600;margin-top:12px;color:#636366'>Cerca un'azione</div>
-        <div style='font-size:0.85rem;margin-top:8px;color:#48484a'>
+        <div style='font-size:1.1rem;font-weight:600;margin-top:12px;color:#8E8E93'>Cerca un'azione</div>
+        <div style='font-size:0.85rem;margin-top:8px;color:#8E8E93'>
             Scrivi il nome dell'azienda o il ticker diretto<br><br>
-            <span style='color:#3a3a3c'>AAPL · Apple · ENI.MI · Volkswagen · SIE.DE · 9984.T · BNP.PA</span>
+            <span style='color:#AEAEB2'>AAPL · Apple · ENI.MI · Volkswagen · SIE.DE · 9984.T · BNP.PA</span>
         </div>
     </div>
     """, unsafe_allow_html=True)

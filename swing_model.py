@@ -550,6 +550,11 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
     earnings = earnings_warning(info, today)
     if earnings:
         result["warnings"].append(earnings)
+    if info.get("_source") == "statements":
+        result["warnings"].append(
+            "Fondamentali calcolati dagli ultimi bilanci annuali, perché Yahoo non ha fornito "
+            "il riepilogo: mancano settore, target degli analisti e data della trimestrale, "
+            "e la valutazione è confrontata con i multipli medi di mercato")
 
     scores = {"fundamentals": fund["score"], "trend": trend["score"], "chart": chart["score"]}
     weights = {k: w for k, w in WEIGHTS.items() if scores[k] is not None}

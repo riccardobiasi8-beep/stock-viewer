@@ -17,6 +17,7 @@ Livelli:
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timezone
 
 import numpy as np
@@ -245,6 +246,21 @@ def canonical_sector(raw):
         if any(k in text for k in keywords):
             return sector
     return None
+
+
+FUND_SECTOR_WORDS = ("closed end", "closed-end", "investment trust", "investment compan",
+                     "collective invest", "investment instrument")
+FUND_REASON = ("Fondo d'investimento quotato (investment trust), non un'azienda: "
+               "fondamentali e settore non sono confrontabili")
+
+
+def looks_like_fund(raw_sector=None, name=None) -> bool:
+    """Fondi chiusi quotati (investment trust): non sono aziende, il modello non li valuta."""
+    sector_text = str(raw_sector or "").lower()
+    if any(w in sector_text for w in FUND_SECTOR_WORDS) and "real estate" not in sector_text:
+        return True
+    name_text = str(name or "").lower().strip()
+    return bool(re.search(r"\binvestment trust\b|\btrust (plc|ord)\b|\btrust$", name_text))
 
 
 def region_for(ticker: str):
@@ -716,6 +732,8 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
         result["exclusions"].append(
             "Scambi troppo bassi per entrare e uscire velocemente dal titolo")
 
+    if looks_like_fund((sector or {}).get("raw"), result["name"]):
+        result["exclusions"].append(FUND_REASON)
     fund = fundamentals_layer(info, ind["price"])
     trend = trend_layer(ind, index_hist, index_symbol)
     sector_res = sector_layer(ind, sector)

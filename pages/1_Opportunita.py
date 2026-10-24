@@ -8,9 +8,9 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-from data_sources import enrich_info
-from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, index_candidates_for,
-                         sort_key, technical_precheck)
+from data_sources import enrich_info, fundamentals_from_statements
+from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, guess_currency,
+                         index_candidates_for, sort_key, technical_precheck)
 from universes import EUROPE_EXCHANGES, EXCHANGES, US_UNIVERSES, fetch_universe
 
 st.set_page_config(page_title="Opportunità", page_icon="🎯", layout="wide",
@@ -53,17 +53,49 @@ VERDICT_COLORS = {"valido": "#30d158", "osservazione": "#ff9f0a", "scartato": "#
 KEY_FIELDS = ("trailingPE", "forwardPE", "enterpriseToEbitda", "profitMargins",
               "returnOnEquity", "freeCashflow")
 _INFO_CACHE = {}          # ticker -> (istante, info): evita di riscaricare entro 30 minuti
-DOWNLOAD_FAILED = "Fondamentali non scaricati: Yahoo ha limitato le richieste, riprova tra qualche minuto"
+# Se Yahoo rifiuta il riepilogo (errore 401) o fallisce più volte di fila, per 15 minuti
+# si passa direttamente ai bilanci invece di insistere e far sembrare ferma la scansione.
+_SUMMARY = {"blocked_until": 0.0, "fails": 0}
+DOWNLOAD_FAILED = ("Fondamentali non scaricati: Yahoo ha rifiutato le richieste "
+                   "e i bilanci non sono disponibili")
 
 
 def _has_fundamentals(info: dict) -> bool:
     return bool(info) and any(info.get(k) is not None for k in KEY_FIELDS + ("marketCap",))
 
 
-def fetch_info(ticker: str, fmp_key: str, retries: int = 3) -> dict | None:
+def _is_auth_error(error) -> bool:
+    return any(k in str(error) for k in ("401", "Unauthorized", "Invalid Crumb"))
+
+
+def _summary_info(t, ticker: str, retries: int = 2) -> dict:
+    """Riepilogo Yahoo (ticker.info), con uscita rapida se Yahoo lo rifiuta."""
+    if time.time() < _SUMMARY["blocked_until"]:
+        return {}
+    for attempt in range(retries):
+        try:
+            info = t.info or {}
+        except Exception as e:
+            print(f"[Opportunità] info {ticker}: {str(e)[:80]}")
+            if _is_auth_error(e):
+                _SUMMARY["blocked_until"] = time.time() + 900
+                return {}
+            info = {}
+        if _has_fundamentals(info):
+            _SUMMARY["fails"] = 0
+            return info
+        if attempt < retries - 1:
+            time.sleep(1.5 + random.random())
+    _SUMMARY["fails"] += 1
+    if _SUMMARY["fails"] >= 5:
+        _SUMMARY["blocked_until"] = time.time() + 900
+    return {}
+
+
+def fetch_info(ticker: str, fmp_key: str, hist=None) -> dict | None:
     """
-    Scarica i fondamentali con nuovi tentativi se Yahoo blocca le richieste.
-    Restituisce None se il download fallisce (diverso da 'dati che non esistono').
+    Fondamentali: prima il riepilogo di Yahoo, altrimenti calcolati dai bilanci.
+    Restituisce None solo se non si ottiene nulla da nessuna delle due fonti.
     Nessuna chiamata Streamlit qui: la funzione gira anche nei thread.
     """
     cached = _INFO_CACHE.get(ticker)
@@ -71,25 +103,24 @@ def fetch_info(ticker: str, fmp_key: str, retries: int = 3) -> dict | None:
         return cached[1]
 
     t = yf.Ticker(ticker)
-    info = {}
-    for attempt in range(retries):
+    info = _summary_info(t, ticker)
+    if _has_fundamentals(info):
+        if sum(info.get(k) is not None for k in KEY_FIELDS) < 3:
+            try:
+                info = enrich_info(t, ticker, info, fmp_key)
+            except Exception as e:
+                print(f"[Opportunità] enrich {ticker}: {e}")
+    else:
+        close = hist["Close"].dropna() if hist is not None and not hist.empty else None
+        if close is None or close.empty:
+            return None
         try:
-            info = t.info or {}
+            info = fundamentals_from_statements(t, float(close.iloc[-1]), guess_currency(ticker))
         except Exception as e:
-            print(f"[Opportunità] info {ticker} tentativo {attempt + 1}: {e}")
+            print(f"[Opportunità] bilanci {ticker}: {str(e)[:80]}")
             info = {}
-        if _has_fundamentals(info):
-            break
-        time.sleep(2 * (attempt + 1) + random.random())
-    if not _has_fundamentals(info):
-        return None
-
-    # Bilanci solo se mancano i dati chiave: costa altre richieste a Yahoo
-    if sum(info.get(k) is not None for k in KEY_FIELDS) < 3:
-        try:
-            info = enrich_info(t, ticker, info, fmp_key)
-        except Exception as e:
-            print(f"[Opportunità] enrich {ticker}: {e}")
+        if not _has_fundamentals(info):
+            return None
 
     _INFO_CACHE[ticker] = (time.time(), info)
     return info
@@ -136,7 +167,7 @@ def error_result(ticker: str, reason: str) -> dict:
 
 def analyze_with_history(ticker: str, hist, index_hist, index_symbol: str, fmp_key: str) -> dict:
     try:
-        info = fetch_info(ticker, fmp_key)
+        info = fetch_info(ticker, fmp_key, hist)
         if info is None:
             return error_result(ticker, DOWNLOAD_FAILED)
         return analyze(ticker, info, hist, index_hist, index_symbol)

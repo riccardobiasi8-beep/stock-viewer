@@ -1,13 +1,17 @@
 import concurrent.futures as cf
+import html
+import json
 import random
 import re
 import time
 from collections import Counter
 
 import pandas as pd
+import requests
 import streamlit as st
 import yfinance as yf
 
+from backtest import breakdown, regime_frame, run_backtest, score_bucket, summarize
 from data_sources import enrich_info, fundamentals_from_statements
 from swing_model import (FUND_REASON, HORIZON_MAX_DAYS, MIN_RR, analyze, canonical_sector,
                          guess_currency, looks_like_fund,
@@ -129,20 +133,20 @@ def fetch_info(ticker: str, fmp_key: str, hist=None) -> dict | None:
     return info
 
 
-def fetch_history(ticker: str) -> pd.DataFrame:
+def fetch_history(ticker: str, period: str = "2y") -> pd.DataFrame:
     try:
-        return yf.Ticker(ticker).history(period="2y", auto_adjust=True)
+        return yf.Ticker(ticker).history(period=period, auto_adjust=True)
     except Exception:
         return pd.DataFrame()
 
 
-def bulk_history(tickers, chunk=100, on_progress=None) -> dict:
+def bulk_history(tickers, chunk=100, on_progress=None, period="2y") -> dict:
     """Scarica lo storico di molti titoli con poche richieste."""
     out = {}
     for start in range(0, len(tickers), chunk):
         batch = tickers[start:start + chunk]
         try:
-            df = yf.download(batch, period="2y", auto_adjust=True, group_by="ticker",
+            df = yf.download(batch, period=period, auto_adjust=True, group_by="ticker",
                              threads=True, progress=False)
         except Exception as e:
             print(f"[Opportunità] download: {e}")
@@ -180,32 +184,81 @@ def get_sector_history(symbol: str) -> pd.DataFrame:
     return hist
 
 
-_YAHOO_SECTOR = {}        # ticker -> settore/industria dalla ricerca Yahoo (o None)
+_YAHOO_SEARCH = {}        # ticker -> {"sector", "news"} dalla ricerca Yahoo
 
 
-def yahoo_sector(ticker: str):
+def yahoo_search(ticker: str) -> dict:
     """
-    Settore e industria dalla ricerca di Yahoo, che funziona anche quando il riepilogo è bloccato.
-    I fondi e gli ETF vengono segnalati come 'Closed End Investments'.
+    Una sola richiesta alla ricerca di Yahoo (funziona anche quando il riepilogo è bloccato):
+    settore/industria del titolo e notizie recenti. Fondi ed ETF → 'Closed End Investments'.
     """
-    if ticker in _YAHOO_SECTOR:
-        return _YAHOO_SECTOR[ticker]
-    raw = None
+    if ticker in _YAHOO_SEARCH:
+        return _YAHOO_SEARCH[ticker]
+    out = {"sector": None, "news": []}
     try:
-        quotes = getattr(yf.Search(ticker, max_results=5), "quotes", []) or []
-        for q in quotes:
+        search = yf.Search(ticker, max_results=5, news_count=10)
+        for q in getattr(search, "quotes", []) or []:
             if str(q.get("symbol", "")).upper() != ticker.upper():
                 continue
             if q.get("quoteType") in ("ETF", "MUTUALFUND", "CLOSEDENDFUND"):
-                raw = "Closed End Investments"
+                out["sector"] = "Closed End Investments"
             else:
                 parts = [q.get("industry") or q.get("industryDisp"), q.get("sector") or q.get("sectorDisp")]
-                raw = " · ".join(p for p in parts if p) or None
+                out["sector"] = " · ".join(p for p in parts if p) or None
             break
+        out["news"] = [{"title": n.get("title"), "publisher": n.get("publisher", ""),
+                        "time": n.get("providerPublishTime")}
+                       for n in getattr(search, "news", []) or [] if n.get("title")]
     except Exception as e:
-        print(f"[Opportunità] settore {ticker}: {str(e)[:80]}")
-    _YAHOO_SECTOR[ticker] = raw
-    return raw
+        print(f"[Opportunità] ricerca {ticker}: {str(e)[:80]}")
+    _YAHOO_SEARCH[ticker] = out
+    return out
+
+
+def yahoo_sector(ticker: str):
+    return yahoo_search(ticker)["sector"]
+
+
+_POLYMARKET = {}
+COMPANY_SUFFIXES = r"\b(inc|corp|corporation|company|co|holdings?|group|plc|ag|se|sa|s\.a|spa|s\.p\.a|nv|n\.v|ltd|limited|class [abc])\b\.?"
+
+
+def polymarket_markets(name: str, ticker: str) -> list:
+    """Mercati aperti di Polymarket che citano la società (solo informativi, fuori dal punteggio)."""
+    if ticker in _POLYMARKET:
+        return _POLYMARKET[ticker]
+    company = re.sub(COMPANY_SUFFIXES, " ", str(name or ""), flags=re.I)
+    company = " ".join(re.sub(r"[^\w&' -]", " ", company).split()[:2]).strip()
+    root = ticker.split(".")[0]
+    found = []
+    if len(company) >= 3:
+        try:
+            response = requests.get("https://gamma-api.polymarket.com/public-search",
+                                    params={"q": company}, timeout=8)
+            for event in (response.json() or {}).get("events", []) or []:
+                if event.get("closed"):
+                    continue
+                for market in event.get("markets", []) or []:
+                    if market.get("closed") or market.get("active") is False:
+                        continue
+                    text = f"{event.get('title', '')} {market.get('question', '')}"
+                    mentions = re.search(rf"\b{re.escape(company)}\b", text, re.I) or \
+                        (len(root) >= 3 and re.search(rf"\b{re.escape(root)}\b", text))
+                    if not mentions:
+                        continue
+                    outcomes = json.loads(market.get("outcomes") or "[]")
+                    prices = [float(p) for p in json.loads(market.get("outcomePrices") or "[]")]
+                    if not outcomes or len(outcomes) != len(prices):
+                        continue
+                    found.append({"question": market.get("question") or event.get("title"),
+                                  "outcomes": list(zip(outcomes, prices)),
+                                  "volume": float(market.get("volume") or 0),
+                                  "end": str(market.get("endDate") or "")[:10]})
+        except Exception as e:
+            print(f"[Opportunità] Polymarket {ticker}: {str(e)[:80]}")
+    found = sorted(found, key=lambda m: -m["volume"])[:3]
+    _POLYMARKET[ticker] = found
+    return found
 
 
 def sector_context(ticker: str, raw_sector, peers=None):
@@ -239,7 +292,11 @@ def analyze_with_history(ticker: str, hist, index_hist, index_symbol: str, fmp_k
         if not canonical_sector(raw) and not looks_like_fund(raw):
             raw = yahoo_sector(ticker) or raw          # settore di Wikipedia non riconosciuto
         sector = sector_context(ticker, raw, peers)
-        return analyze(ticker, info, hist, index_hist, index_symbol, sector=sector)
+        result = analyze(ticker, info, hist, index_hist, index_symbol, sector=sector,
+                         news=yahoo_search(ticker)["news"])
+        if result["verdict"] != "scartato":
+            result["polymarket"] = polymarket_markets(result["name"], ticker)
+        return result
     except Exception as e:
         return error_result(ticker, f"Dati non recuperabili: {e}")
 
@@ -355,6 +412,24 @@ def score_bar(label, score, note):
             f"<div class='sb-note'>{note}</div></div>")
 
 
+def tone_color(tone):
+    return "#30d158" if tone >= 0.15 else "#ff453a" if tone <= -0.15 else "#8e8e93"
+
+
+def sentiment_note(r: dict) -> str:
+    d, lab = r.get("details") or {}, r.get("labels") or {}
+    parts = []
+    tone = d.get("news_tone")
+    if tone is not None:
+        mood = "positive" if tone >= 0.15 else "negative" if tone <= -0.15 else "neutre"
+        parts.append(f"Notizie {mood} ({d.get('news_count', 0)})")
+    if lab.get("analysts"):
+        parts.append(f"Analisti: {lab['analysts']}")
+    if d.get("short_pct") is not None:
+        parts.append(f"Short {d['short_pct']:.0f}%")
+    return " · ".join(parts) or "Dati di sentiment non disponibili"
+
+
 def render_result(r: dict):
     cur = r.get("currency", "")
     color = VERDICT_COLORS.get(r["verdict"], "#8e8e93")
@@ -411,17 +486,32 @@ def render_result(r: dict):
     if s:
         st.markdown("<div class='sec'>Punteggi</div>", unsafe_allow_html=True)
         st.markdown(
-            score_bar("Fondamentali (peso 25%)", s.get("fundamentals"), lab.get("valuation", ""))
+            score_bar("Fondamentali (peso 20%)", s.get("fundamentals"), lab.get("valuation", ""))
             + score_bar("Trend di mercato (peso 15%)", s.get("trend"),
                         f"{lab.get('index', '')}: {lab.get('regime', '')}")
-            + score_bar("Trend di settore (peso 20%)", s.get("sector"),
+            + score_bar("Trend di settore (peso 15%)", s.get("sector"),
                         (f"{lab.get('sector')}: {lab.get('sector_regime', '')}"
                          + (f" · {lab.get('sector_source')}" if lab.get("sector_source") else ""))
                         if lab.get("sector") else "Settore non disponibile")
-            + score_bar("Grafico (peso 40%)", s.get("chart"), lab.get("stage", "")),
+            + score_bar("Grafico (peso 40%)", s.get("chart"), lab.get("stage", ""))
+            + score_bar("Sentiment (peso 10%)", s.get("sentiment"), sentiment_note(r)),
             unsafe_allow_html=True)
 
     d = r.get("details") or {}
+    if d.get("headlines"):
+        st.markdown("<div class='sec'>Notizie recenti analizzate</div>", unsafe_allow_html=True)
+        st.markdown("".join(
+            f"<div class='reason'><span style='color:{tone_color(h['tone'])}'>●</span> "
+            f"{html.escape(h['title'])} <span class='card-sub'>{html.escape(h.get('publisher') or '')}</span></div>"
+            for h in d["headlines"]), unsafe_allow_html=True)
+    if r.get("polymarket"):
+        st.markdown("<div class='sec'>Polymarket (solo informativo, non entra nel punteggio)</div>",
+                    unsafe_allow_html=True)
+        for m in r["polymarket"]:
+            odds = " · ".join(f"{html.escape(str(o))} {p * 100:.0f}%" for o, p in m["outcomes"])
+            st.markdown(f"<div class='reason'>{html.escape(m['question'])}<br><span class='card-sub'>"
+                        f"{odds} · scadenza {m['end'] or 'n.d.'} · volume {m['volume']:,.0f} $</span></div>",
+                        unsafe_allow_html=True)
     if d:
         with st.expander("Come è stato calcolato"):
             def num(v, dec=2, suffix=""):
@@ -441,6 +531,10 @@ def render_result(r: dict):
                 ("Forza relativa 3 mesi", num(d.get("relative_strength"), 1, " punti %"),
                  "rendimento del titolo meno quello dell'indice"),
                 ("Settore (fonte indice)", d.get("sector_raw") or "n.d.", ""),
+                ("Tono delle notizie", num(d.get("news_tone"), 2),
+                 f"{d.get('news_count', 0)} titoli, scala da -1 a +1"),
+                ("Giudizio medio analisti", num(d.get("recommendation_mean"), 2), "1 = acquisto forte, 5 = vendita"),
+                ("Short interest", num(d.get("short_pct"), 1, "%"), "quota di azioni vendute allo scoperto"),
                 ("Forza relativa vs settore 3 mesi", num(d.get("sector_relative_strength"), 1, " punti %"),
                  "rendimento del titolo meno quello del settore"),
                 ("RSI 14", num(d.get("rsi"), 0), ""),
@@ -467,7 +561,7 @@ st.markdown(
     f"per operazioni da 1 a {HORIZON_MAX_DAYS // 21} mesi.</div>",
     unsafe_allow_html=True)
 
-tab_single, tab_scan = st.tabs(["Analizza un titolo", "Scansiona gli indici"])
+tab_single, tab_scan, tab_backtest = st.tabs(["Analizza un titolo", "Scansiona gli indici", "Backtest"])
 
 with tab_single:
     query = st.text_input("Titolo", placeholder="Nome o ticker: Apple, Leonardo, AAPL, ENI.MI…",
@@ -643,7 +737,135 @@ with tab_scan:
                                            for r in rejected]),
                              hide_index=True, width="stretch")
 
+STAGE_NAMES = {"2-iniziale": "Stadio 2 iniziale", "2-in-corso": "Stadio 2 in corso",
+               "2-esteso": "Stadio 2 esteso", "2-pausa": "Stadio 2 in pausa",
+               "2-correzione": "Stadio 2 in correzione", "1-uscita": "Stadio 1 in uscita",
+               "1-base": "Stadio 1 base"}
+
+
+def render_backtest(bt: dict):
+    trades, counts = bt["trades"], bt["counts"]
+    st.markdown("<div class='sec'>Risultati</div>", unsafe_allow_html=True)
+    st.caption(f"{bt['n_tickers']} titoli, ultimi {bt['years']} anni · {counts['segnali']} segnali, "
+               f"{counts['non_eseguiti']} ordini mai eseguiti · trend di settore disponibile per "
+               f"{bt['sector_coverage']} titoli")
+    summary = summarize(trades) if not trades.empty else {"chiuse": 0}
+    if summary["chiuse"] == 0:
+        st.info("Nessuna operazione chiusa nel periodo: prova con più borse o un periodo più lungo.")
+        return
+
+    extra = summary["extra_vs_indice"]
+    if summary["media_netta"] > 0 and (extra is None or extra > 0):
+        verdict = (f"Nel periodo il modello ha guadagnato in media **{summary['media_netta']:+.2f}%** netto "
+                   "per operazione" + (f", **{extra:+.2f} punti** meglio dell'indice negli stessi giorni." if extra is not None else "."))
+    else:
+        verdict = (f"Nel periodo il modello ha reso in media **{summary['media_netta']:+.2f}%** netto per operazione"
+                   + (f", {extra:+.2f} punti rispetto all'indice negli stessi giorni" if extra is not None else "")
+                   + ": così com'è non avrebbe aggiunto valore.")
+    st.markdown(verdict)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(card("Operazioni chiuse", f"{summary['chiuse']}", f"{summary['in_corso']} ancora aperte"), unsafe_allow_html=True)
+    c2.markdown(card("In guadagno", f"{summary['win_pct']:.0f}%", f"mediana {summary['mediana_netta']:+.2f}%"), unsafe_allow_html=True)
+    c3.markdown(card("Netto medio", f"{summary['media_netta']:+.2f}%", f"lordo {summary['media_lorda']:+.2f}%",
+                     "#30d158" if summary["media_netta"] > 0 else "#ff453a"), unsafe_allow_html=True)
+    c4.markdown(card("Rispetto all'indice", f"{extra:+.2f} punti" if extra is not None else "n.d.",
+                     "a parità di giorni", "#30d158" if (extra or 0) > 0 else "#ff453a"), unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown(card("Chiuse al target", f"{summary['target_pct']:.0f}%"), unsafe_allow_html=True)
+    c2.markdown(card("Chiuse allo stop", f"{summary['stop_pct']:.0f}%"), unsafe_allow_html=True)
+    c3.markdown(card("Uscite a tempo", f"{summary['scadenza_pct']:.0f}%"), unsafe_allow_html=True)
+    in_time = summary["target_nei_tempi_pct"]
+    c4.markdown(card("Durata media", f"{summary['giorni_medi']:.0f} sedute",
+                     f"target entro il tempo stimato: {in_time:.0f}%" if in_time is not None else ""),
+                unsafe_allow_html=True)
+
+    closed = trades[trades["outcome"] != "in corso"].sort_values("exit_date")
+    st.markdown("<div class='sec'>Andamento cumulato</div>", unsafe_allow_html=True)
+    st.caption("Somma dei rendimenti netti delle operazioni chiuse, a importo uguale per operazione")
+    st.line_chart(closed.set_index("exit_date")["net_pct"].cumsum().rename("Rendimento netto cumulato %"))
+
+    closed = closed.assign(fascia=closed["score"].apply(score_bucket),
+                           fase=closed["stage"].map(STAGE_NAMES).fillna("altro"))
+    for title, column in (("Per fascia di punteggio: i punteggi alti rendono di più?", "fascia"),
+                          ("Per tendenza del settore: il filtro del settore aiuta?", "sector_regime"),
+                          ("Per fase del grafico", "fase"), ("Per tipo di entrata", "order")):
+        st.markdown(f"<div class='sec'>{title}</div>", unsafe_allow_html=True)
+        st.dataframe(breakdown(closed, column), width="stretch")
+
+    with st.expander("Tutte le operazioni"):
+        view = trades.copy()
+        for col in ("signal_date", "fill_date", "exit_date"):
+            view[col] = pd.to_datetime(view[col]).dt.date
+        st.dataframe(view[["ticker", "signal_date", "fill_date", "exit_date", "outcome", "fill_price",
+                           "exit_price", "gross_pct", "net_pct", "excess_pct", "days", "score",
+                           "sector_regime"]].round(2), hide_index=True, width="stretch")
+    st.markdown(
+        "<div class='card-sub'>Limiti da tenere presenti: gli elenchi sono quelli di oggi, quindi mancano le società "
+        "uscite dagli indici o fallite nel frattempo (i risultati sono un po' ottimistici); i settori sono quelli "
+        f"attuali; costi ipotizzati {0.15:.2f}% per lato; imposta del 26% applicata ai soli guadagni, operazione per "
+        "operazione. Fondamentali e sentiment non sono verificati, perché non esiste uno storico gratuito.</div>",
+        unsafe_allow_html=True)
+
+
+with tab_backtest:
+    st.markdown("<div class='card-sub' style='margin-bottom:8px'>Applica le regole del modello alle date passate, "
+                "con i soli dati disponibili in quel momento, e segue ogni operazione fino a target, stop o "
+                "uscita a tempo. Verifica grafico, trend di mercato, trend di settore e piano di uscita.</div>",
+                unsafe_allow_html=True)
+    bt_all_europe = st.checkbox("Tutta l'Europa (16 borse)", key="bt_all_europe")
+    bt_exchanges = st.multiselect("Borse europee", list(EXCHANGES), default=["Milano"],
+                                  disabled=bt_all_europe, key="bt_exchanges")
+    bt_us = st.multiselect("Indici USA", US_UNIVERSES, default=[], key="bt_us")
+    c1, c2 = st.columns(2)
+    bt_years = c1.selectbox("Periodo", [1, 2, 3], index=1, key="bt_years",
+                            format_func=lambda y: "Ultimo anno" if y == 1 else f"Ultimi {y} anni")
+    bt_step = c2.selectbox("Controlli", [21, 10], key="bt_step",
+                           format_func=lambda d: "Una volta al mese" if d == 21 else "Ogni due settimane")
+    if st.button("Avvia backtest", key="bt_run"):
+        tickers, raw_sectors = [], {}
+        for name in (EUROPE_EXCHANGES if bt_all_europe else bt_exchanges):
+            symbols, _, _, sectors = load_exchange(name)
+            tickers += symbols; raw_sectors.update(sectors)
+        for name in bt_us:
+            symbols, _, _, sectors = load_universe(name)
+            tickers += symbols; raw_sectors.update(sectors)
+        tickers = [t for t in dict.fromkeys(tickers) if not looks_like_fund(raw_sectors.get(t))]
+        if not tickers:
+            st.warning("Nessun titolo da analizzare: scegli almeno una borsa o un indice.")
+        else:
+            progress = st.progress(0.0, text=f"Scarico 5 anni di prezzi per {len(tickers)} titoli…")
+            hists = bulk_history(tickers, period="5y", on_progress=lambda done, total: progress.progress(
+                done / total * 0.4, text=f"Prezzi scaricati per {done} di {total} titoli"))
+            hists = {t: h for t, h in hists.items() if h is not None and not h.empty}
+
+            progress.progress(0.4, text="Scarico indici ed ETF di settore…")
+            candidates = sorted({c for t in hists for c in index_candidates_for(t)})
+            index_hists = bulk_history(candidates, period="5y")
+            market_of = {}
+            for t in hists:
+                for c in index_candidates_for(t):
+                    h = index_hists.get(c)
+                    if h is not None and not h.empty and h["Close"].dropna().shape[0] >= 221:
+                        market_of[t] = c
+                        break
+            market_states = {c: regime_frame(index_hists[c]) for c in set(market_of.values())}
+            sector_of = {t: (b["etf"] if (b := sector_benchmark(t, raw_sectors.get(t))) else None) for t in hists}
+            etfs = sorted({e for e in sector_of.values() if e})
+            etf_hists = bulk_history(etfs, period="5y") if etfs else {}
+            sector_states = {e: regime_frame(h) for e, h in etf_hists.items()
+                             if h is not None and not h.empty and h["Close"].dropna().shape[0] >= 221}
+
+            trades, counts = run_backtest(
+                hists, market_of, sector_of, market_states, sector_states, years=bt_years, step_days=bt_step,
+                on_progress=lambda k, n: progress.progress(0.5 + 0.5 * k / n, text=f"Simulo le operazioni: {k} di {n} titoli"))
+            progress.empty()
+            st.session_state["bt"] = {"trades": trades, "counts": counts, "years": bt_years,
+                                      "n_tickers": len(hists),
+                                      "sector_coverage": sum(1 for t in hists if sector_of.get(t) in sector_states)}
+    if st.session_state.get("bt"):
+        render_backtest(st.session_state["bt"])
+
 st.markdown(
-    "<div class='card-sub' style='margin-top:32px'>Stime basate sui dati storici, non garanzie. "
-    "I pesi del modello vanno ancora verificati con un backtest.</div>",
+    "<div class='card-sub' style='margin-top:32px'>Stime basate sui dati storici, non garanzie.</div>",
     unsafe_allow_html=True)

@@ -8,14 +8,18 @@ import html as _html
 import pandas as pd
 import streamlit as st
 
-# ── Colori di sistema iOS (modalità scura) ───────────────────────────────────
-BLUE, GREEN, RED, ORANGE, YELLOW = "#0a84ff", "#30d158", "#ff453a", "#ff9f0a", "#ffd60a"
-LABEL, LABEL2, LABEL3 = "#ffffff", "rgba(235,235,245,0.6)", "rgba(235,235,245,0.3)"
-BG, GROUP, GROUP2, SEPARATOR = "#000000", "#1c1c1e", "#2c2c2e", "rgba(84,84,88,0.6)"
+# ── Palette in stile Apple (modalità chiara) ──────────────────────────────────
+# Accento blu di sistema; verde/rosso/arancio nelle varianti "accessibili" che Apple
+# usa per il testo su fondo chiaro: leggibili e meno aggressive dei toni pieni.
+BLUE, GREEN, RED, ORANGE, YELLOW = "#007AFF", "#248A3D", "#D70015", "#C93400", "#B25000"
+LABEL, LABEL2, LABEL3 = "#1C1C1E", "#6E6E73", "#AEAEB2"
+BG, GROUP, GROUP2, SEPARATOR = "#F2F2F7", "#FFFFFF", "#E9E9EB", "#E5E5EA"
+BLUE_SOFT = "#E8F1FF"        # selezioni: azzurro tenue invece del blu pieno
+CHART_UP, CHART_DOWN = "#34C759", "#FF3B30"
 
 CSS = f"""
 <style>
-:root {{ color-scheme: dark; }}
+:root {{ color-scheme: light; }}
 html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main {{
   background: {BG} !important; color: {LABEL};
 }}
@@ -23,120 +27,177 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main {{
      "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }}
 [data-testid="stHeader"], [data-testid="stSidebar"], [data-testid="stToolbar"],
 footer, #MainMenu, .stDeployButton {{ display: none !important; }}
-.block-container {{ padding: 20px 16px 80px !important; max-width: 860px; margin: auto; }}
-p, li, label, span {{ color: inherit; }}
+.block-container {{ padding: 24px 18px 80px !important; max-width: 860px; margin: auto; }}
+[data-testid="stMarkdownContainer"] p {{ color: {LABEL}; }}
 
-/* Tipografia */
-.ios-large-title {{ font-size: 34px; font-weight: 700; letter-spacing: 0.37px; line-height: 41px; margin: 8px 0 2px; }}
-.ios-subtitle {{ font-size: 17px; color: {LABEL2}; line-height: 22px; margin-bottom: 18px; }}
-.ios-section {{ font-size: 22px; font-weight: 700; letter-spacing: 0.35px; margin: 28px 0 4px; }}
+/* Tipografia (scala iOS) */
+.ios-large-title {{ font-size: 34px; font-weight: 700; letter-spacing: 0.37px; line-height: 41px; margin: 6px 0 4px; color: {LABEL}; }}
+.ios-subtitle {{ font-size: 17px; color: {LABEL2}; line-height: 22px; margin-bottom: 20px; }}
+.ios-section {{ font-size: 20px; font-weight: 600; letter-spacing: 0.38px; margin: 30px 0 4px; color: {LABEL}; }}
 .ios-footnote {{ font-size: 13px; color: {LABEL2}; line-height: 18px; margin: 2px 0 10px; }}
 .ios-caption {{ font-size: 12px; color: {LABEL3}; }}
 
-/* Campi di testo */
-[data-testid="stTextInput"] label, [data-testid="stWidgetLabel"] p {{
-  font-size: 13px !important; color: {LABEL2} !important; font-weight: 400 !important;
+/* Etichette dei controlli */
+[data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label {{
+  font-size: 13px !important; color: {LABEL2} !important; font-weight: 500 !important;
+  text-transform: none; letter-spacing: 0;
 }}
-[data-baseweb="input"], [data-baseweb="base-input"], [data-baseweb="select"] > div {{
-  background: {GROUP} !important; border: none !important; border-radius: 12px !important;
+
+/* Campi di testo e menu */
+[data-baseweb="input"], [data-baseweb="base-input"], [data-baseweb="select"] > div,
+[data-testid="stTextInputRootElement"] {{
+  background: {GROUP} !important; border: 1px solid {SEPARATOR} !important; border-radius: 12px !important;
 }}
-[data-baseweb="input"] input {{ color: {LABEL} !important; font-size: 17px !important; padding: 12px 14px !important; }}
-[data-baseweb="input"] input::placeholder {{ color: {LABEL3} !important; }}
+[data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within,
+[data-testid="stTextInputRootElement"]:focus-within {{
+  border-color: {BLUE} !important; box-shadow: 0 0 0 3px {BLUE_SOFT} !important;
+}}
+[data-baseweb="input"] input, [data-testid="stTextInputField"] {{
+  color: {LABEL} !important; font-size: 17px !important; padding: 12px 14px !important;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Helvetica Neue", Arial, sans-serif !important; }}
+/* Dentro le schede bianche i campi diventano grigio chiaro, come nei moduli di iOS */
+[class*="st-key-"][class*="_box"] [data-baseweb="input"], [class*="st-key-"][class*="_box"] [data-baseweb="base-input"],
+[class*="st-key-"][class*="_box"] [data-testid="stTextInputRootElement"] {{
+  background: {BG} !important; border-color: transparent !important;
+}}
+[data-baseweb="input"] input::placeholder, [data-testid="stTextInputField"]::placeholder {{ color: {LABEL3} !important; }}
 [data-baseweb="select"] * {{ color: {LABEL} !important; }}
-[data-baseweb="popover"] ul, [data-baseweb="menu"] {{ background: {GROUP2} !important; }}
+[data-testid="stSelectbox"] [role="group"] {{
+  background: {GROUP} !important; border: 1px solid {SEPARATOR} !important; border-radius: 12px !important;
+}}
 
 /* Pulsanti */
-[data-testid="stBaseButton-primary"] {{
+button[kind="primary"], [data-testid="stBaseButton-primary"] {{
   background: {BLUE} !important; color: #fff !important; border: none !important;
   border-radius: 12px !important; min-height: 50px; font-size: 17px !important; font-weight: 600 !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
 }}
-[data-testid="stBaseButton-primary"]:hover {{ filter: brightness(1.1); }}
-[data-testid="stBaseButton-secondary"] {{
-  background: {GROUP} !important; color: {BLUE} !important; border: none !important;
+button[kind="primary"] p {{ color: #fff !important; }}
+button[kind="primary"]:hover {{ filter: brightness(1.06); }}
+button[kind="primary"]:disabled {{ background: {GROUP2} !important; color: {LABEL3} !important; box-shadow: none; }}
+button[kind="primary"]:disabled p {{ color: {LABEL3} !important; }}
+button[kind="secondary"], [data-testid="stBaseButton-secondary"] {{
+  background: {BLUE_SOFT} !important; color: {BLUE} !important; border: none !important;
   border-radius: 10px !important; font-weight: 500 !important;
 }}
-[data-testid="stBaseButton-tertiary"] {{ color: {BLUE} !important; }}
+button[kind="secondary"] p {{ color: {BLUE} !important; }}
+button[kind="secondary"]:hover {{ filter: brightness(0.97); }}
 
-/* Pillole (selezione multipla) */
-[data-testid="stBaseButton-pills"] {{
-  background: {GROUP} !important; color: {LABEL} !important; border: 1px solid {GROUP2} !important;
-  border-radius: 18px !important; font-size: 15px !important;
+/* Pillole (selezione multipla) — agganci per più versioni di Streamlit */
+button[data-variant="pills"], button[kind="pills"] {{
+  background: {GROUP} !important; border: 1px solid {SEPARATOR} !important; border-radius: 18px !important;
+  box-shadow: 0 1px 1px rgba(0,0,0,0.03) !important; color: {LABEL} !important;
 }}
-[data-testid="stBaseButton-pillsActive"] {{
-  background: {BLUE} !important; color: #fff !important; border: 1px solid {BLUE} !important;
-  border-radius: 18px !important; font-size: 15px !important;
+button[data-variant="pills"] p, button[kind="pills"] p {{ color: {LABEL} !important; font-size: 15px !important; }}
+button[data-variant="pills"][data-selected="true"], button[kind="pillsActive"] {{
+  background: {BLUE_SOFT} !important; border: 1px solid {BLUE} !important;
 }}
-
-/* Controllo segmentato */
-[data-testid="stBaseButton-segmented_control"] {{
-  background: {GROUP} !important; color: {LABEL} !important; border: none !important; font-size: 15px !important;
-}}
-[data-testid="stBaseButton-segmented_controlActive"] {{
-  background: #636366 !important; color: #fff !important; border: none !important;
-  font-size: 15px !important; font-weight: 600 !important;
+button[data-variant="pills"][data-selected="true"] p, button[kind="pillsActive"] p {{
+  color: {BLUE} !important; font-weight: 600 !important;
 }}
 
-/* Schede (pagina principale) come controllo segmentato */
-[data-testid="stTabs"] [role="tablist"] {{ background: {GROUP}; border-radius: 10px; padding: 3px; gap: 2px; border: none; }}
-[data-testid="stTabs"] [role="tab"] {{ border-radius: 8px; padding: 6px 14px; color: {LABEL2}; border: none !important; }}
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background: #636366; color: #fff; }}
+/* Controllo segmentato come in iOS: binario grigio, segmento scelto bianco */
+[data-testid="stButtonGroup"]:has(button[data-variant="segmented_control"]) > div,
+[data-testid="stButtonGroup"]:has(button[kind^="segmented_control"]) > div {{
+  background: {GROUP2}; border-radius: 10px; padding: 2px; display: inline-flex; gap: 2px;
+}}
+button[data-variant="segmented_control"], button[kind="segmented_control"] {{
+  background: transparent !important; border: none !important; border-radius: 8px !important;
+  box-shadow: none !important; padding: 6px 18px !important; min-height: 32px;
+}}
+button[data-variant="segmented_control"] p, button[kind="segmented_control"] p {{
+  color: {LABEL} !important; font-size: 15px !important;
+}}
+button[data-variant="segmented_control"][data-selected="true"], button[kind="segmented_controlActive"] {{
+  background: {GROUP} !important; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 1px rgba(0,0,0,0.04) !important;
+}}
+button[data-variant="segmented_control"][data-selected="true"] p, button[kind="segmented_controlActive"] p {{
+  font-weight: 600 !important;
+}}
+
+/* Schede della pagina principale come controllo segmentato */
+[data-testid="stTabs"] [role="tablist"] {{ background: {GROUP2}; border-radius: 10px; padding: 2px; gap: 0; border: none; }}
+[data-testid="stTabs"] [role="tab"] {{ border-radius: 8px; padding: 6px 16px; border: none !important; }}
+[data-testid="stTabs"] [role="tab"] p {{ color: {LABEL} !important; font-size: 15px; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background: {GROUP}; box-shadow: 0 1px 3px rgba(0,0,0,0.12) !important; }}
+[data-testid="stTabs"] [role="tab"], [data-testid="stTab"] {{ border-bottom: none !important; }}
+[data-testid="stTabs"] [role="tab"]::after, [data-testid="stTabs"] [role="tab"]::before,
+[data-testid="stTabs"] [role="tablist"]::after, [data-testid="stTabs"] [role="tablist"]::before {{ display: none !important; }}
+[data-testid="stTabs"] [role="tablist"] {{ border-bottom: none !important; box-shadow: none !important; }}
+[data-testid="stTabs"] .react-aria-SelectionIndicator {{ display: none !important; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ font-weight: 600; }}
 [data-testid="stTabs"] [data-baseweb="tab-highlight"], [data-testid="stTabs"] [data-baseweb="tab-border"] {{ display: none; }}
 
-/* Espandi/chiudi come righe di un elenco iOS */
-[data-testid="stExpander"] details {{ background: {GROUP}; border: none !important; border-radius: 14px; }}
-[data-testid="stExpander"] summary {{ padding: 14px 16px; font-size: 16px; }}
-[data-testid="stExpander"] summary:hover {{ color: {LABEL}; }}
+/* Espandi/chiudi come righe di un gruppo iOS */
+[data-testid="stExpander"] details {{ background: {GROUP}; border: none !important; border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+[data-testid="stExpander"] summary {{ padding: 14px 16px; }}
+[data-testid="stExpander"] summary p {{ color: {LABEL} !important; font-size: 16px; }}
 
-/* Contenitori con bordo come gruppi */
-[data-testid="stVerticalBlockBorderWrapper"] {{ border-color: {GROUP2} !important; border-radius: 16px !important; }}
+/* Contenitori con bordo = gruppi bianchi (riquadri con nome *_box) */
+[class*="st-key-"][class*="_box"], [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]) {{
+  background: {GROUP}; border: none !important; border-radius: 18px !important; padding: 18px 18px 14px !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 4px 16px rgba(0,0,0,0.03);
+}}
 
-/* Avvisi, barra di avanzamento, tabelle */
-[data-testid="stAlert"] {{ background: {GROUP} !important; border-radius: 12px !important; border: none !important; }}
+/* Avvisi, avanzamento, tabelle */
+[data-testid="stAlert"] {{ background: {GROUP} !important; border-radius: 12px !important; border: 1px solid {SEPARATOR} !important; }}
+[data-testid="stAlert"] p {{ color: {LABEL} !important; }}
 [data-testid="stProgress"] > div > div > div > div {{ background: {BLUE} !important; }}
+[data-testid="stProgress"] p {{ color: {LABEL2} !important; font-size: 13px; }}
 [data-testid="stDataFrame"] {{ border-radius: 12px; overflow: hidden; }}
+a, a p {{ color: {BLUE} !important; }}
 
 /* Componenti propri */
-.ios-card {{ background: {GROUP}; border-radius: 16px; padding: 16px 18px; margin-bottom: 10px; }}
-.ios-tile {{ background: {GROUP}; border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; min-height: 92px; }}
+.ios-card {{ background: {GROUP}; border-radius: 18px; padding: 18px 20px; margin-bottom: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05), 0 4px 16px rgba(0,0,0,0.03); }}
+.ios-tile {{ background: {GROUP}; border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; min-height: 112px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
 .ios-tile-label {{ font-size: 13px; color: {LABEL2}; margin-bottom: 4px; }}
 .ios-tile-value {{ font-size: 22px; font-weight: 600; letter-spacing: 0.35px; line-height: 28px; }}
-.ios-tile-sub {{ font-size: 12px; color: {LABEL3}; margin-top: 3px; line-height: 16px; }}
+.ios-tile-sub {{ font-size: 12px; color: {LABEL2}; margin-top: 3px; line-height: 16px; }}
 .ios-badge {{ display: inline-block; border-radius: 999px; padding: 4px 12px; font-size: 13px; font-weight: 600; }}
 .ios-chip {{ display: inline-block; background: {GROUP2}; border-radius: 6px; padding: 2px 8px;
-             font-size: 13px; font-weight: 600; color: {LABEL2}; margin-right: 6px; }}
-.ios-list {{ background: {GROUP}; border-radius: 14px; overflow: hidden; margin-bottom: 10px; }}
-.ios-row {{ padding: 12px 16px; font-size: 15px; line-height: 20px; border-bottom: 0.5px solid {SEPARATOR}; }}
+             font-size: 13px; font-weight: 600; color: {LABEL}; margin-right: 6px; }}
+.ios-list {{ background: {GROUP}; border-radius: 14px; overflow: hidden; margin-bottom: 10px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+.ios-row {{ padding: 12px 16px; font-size: 15px; line-height: 20px; color: {LABEL}; border-bottom: 1px solid {SEPARATOR}; }}
 .ios-row:last-child {{ border-bottom: none; }}
 .ios-row .sub {{ display: block; font-size: 13px; color: {LABEL2}; margin-top: 2px; }}
 .ios-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }}
-.ios-score {{ padding: 12px 16px; border-bottom: 0.5px solid {SEPARATOR}; }}
+.ios-score {{ padding: 12px 16px; border-bottom: 1px solid {SEPARATOR}; }}
 .ios-score:last-child {{ border-bottom: none; }}
-.ios-score-top {{ display: flex; justify-content: space-between; font-size: 15px; }}
+.ios-score-top {{ display: flex; justify-content: space-between; font-size: 15px; color: {LABEL}; }}
 .ios-score-top .w {{ color: {LABEL3}; font-size: 13px; margin-left: 6px; }}
-.ios-track {{ height: 4px; background: {GROUP2}; border-radius: 2px; margin-top: 8px; }}
-.ios-fill {{ height: 4px; border-radius: 2px; }}
-.ios-table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+.ios-track {{ height: 6px; background: {GROUP2}; border-radius: 3px; margin-top: 8px; }}
+.ios-fill {{ height: 6px; border-radius: 3px; }}
+.ios-table {{ width: 100%; border-collapse: collapse; font-size: 14px; color: {LABEL}; }}
 .ios-table th {{ text-align: right; font-weight: 500; color: {LABEL2}; font-size: 12px; padding: 10px 12px;
-                 border-bottom: 0.5px solid {SEPARATOR}; white-space: nowrap; }}
-.ios-table td {{ text-align: right; padding: 10px 12px; border-bottom: 0.5px solid {SEPARATOR}; white-space: nowrap; }}
+                 border-bottom: 1px solid {SEPARATOR}; white-space: nowrap; }}
+.ios-table td {{ text-align: right; padding: 10px 12px; border-bottom: 1px solid {SEPARATOR}; white-space: nowrap; }}
 .ios-table th:first-child, .ios-table td:first-child {{ text-align: left; }}
 .ios-table tr:last-child td {{ border-bottom: none; }}
-.ios-scroll {{ overflow-x: auto; background: {GROUP}; border-radius: 14px; margin-bottom: 10px; }}
-.ios-hero-price {{ font-size: 40px; font-weight: 700; letter-spacing: 0.4px; line-height: 46px; }}
+.ios-scroll {{ overflow-x: auto; background: {GROUP}; border-radius: 14px; margin-bottom: 10px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+.ios-hero-price {{ font-size: 40px; font-weight: 700; letter-spacing: 0.4px; line-height: 46px; color: {LABEL}; }}
 .ios-hero-cur {{ font-size: 17px; color: {LABEL2}; font-weight: 500; }}
-.ios-callout {{ background: {GROUP}; border-radius: 16px; padding: 16px 18px; font-size: 17px; line-height: 24px; margin: 6px 0 12px; }}
+.ios-callout {{ background: {GROUP}; border-radius: 16px; padding: 16px 18px; font-size: 17px; line-height: 24px;
+  margin: 6px 0 12px; color: {LABEL}; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-left: 4px solid {BLUE}; }}
 
 /* Compatibilità con le classi della pagina principale */
-.metric-card {{ background: {GROUP}; border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; }}
-.metric-label {{ font-size: 13px; color: {LABEL2}; margin-bottom: 4px; }}
+.metric-card {{ background: {GROUP}; border-radius: 14px; padding: 14px 16px; margin-bottom: 10px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+.metric-label {{ font-size: 13px; color: {LABEL2}; margin-bottom: 4px; text-transform: none !important;
+  letter-spacing: 0 !important; font-weight: 400 !important; }}
 .metric-value {{ font-size: 20px; font-weight: 600; color: {LABEL}; }}
 .metric-value.green {{ color: {GREEN}; }} .metric-value.red {{ color: {RED}; }}
 .metric-value.blue {{ color: {BLUE}; }} .metric-value.orange {{ color: {ORANGE}; }}
-.section-header {{ font-size: 22px; font-weight: 700; margin: 26px 0 10px; color: {LABEL}; }}
-.price-main {{ font-size: 40px; font-weight: 700; line-height: 46px; }}
+.section-header {{ font-size: 20px; font-weight: 600; margin: 28px 0 10px; color: {LABEL};
+  text-transform: none !important; letter-spacing: 0.38px !important; border: none !important; }}
+.price-main {{ font-size: 40px; font-weight: 700; line-height: 46px; color: {LABEL}; }}
 .company-name {{ font-size: 15px; color: {LABEL2}; margin-bottom: 4px; }}
 .ticker-badge {{ display: inline-block; background: {GROUP2}; border-radius: 6px; padding: 2px 8px;
-                 font-size: 13px; font-weight: 600; color: {LABEL2}; margin-right: 6px; }}
+                 font-size: 13px; font-weight: 600; color: {LABEL}; margin-right: 6px; }}
 </style>
 """
 

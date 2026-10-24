@@ -7,52 +7,28 @@ import time
 from collections import Counter
 
 import pandas as pd
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
 
 from backtest import breakdown, regime_frame, run_backtest, score_bucket, summarize
 from data_sources import enrich_info, fundamentals_from_statements
-from swing_model import (FUND_REASON, HORIZON_MAX_DAYS, MIN_RR, analyze, canonical_sector,
+from swing_model import (FUND_REASON, HORIZON_MAX_DAYS, MIN_RR, WEIGHTS, analyze, canonical_sector,
                          guess_currency, looks_like_fund,
                          index_candidates_for, peer_average, region_for, sector_benchmark,
                          sort_key, technical_precheck)
+from ui import (BLUE, GREEN, LABEL, LABEL2, ORANGE, RED, apply_style, badge, esc, footnote,
+                html_table, large_title, list_rows, score_rows, section, tiles)
 from universes import (EUROPE_EXCHANGES, EXCHANGES, US_UNIVERSES, fetch_universe_full,
                        indices_for_ticker)
 
 st.set_page_config(page_title="Opportunità", page_icon="🎯", layout="wide",
                    initial_sidebar_state="collapsed")
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-* { font-family: 'Inter', sans-serif; }
-html, body, [data-testid="stAppViewContainer"] { background: #000; color: #f5f5f7; }
-[data-testid="stHeader"], [data-testid="stSidebar"], footer, #MainMenu { display: none !important; }
-.block-container { padding: 16px 16px 60px !important; max-width: 900px; margin: auto; }
-.stTextInput input, .stTextArea textarea {
-    background: #1c1c1e !important; border: 1px solid #3a3a3c !important;
-    border-radius: 12px !important; color: #f5f5f7 !important;
-}
-.card { background: #1c1c1e; border-radius: 12px; padding: 14px 16px; margin-bottom: 8px; }
-.card-label { font-size: 0.75rem; color: #8e8e93; margin-bottom: 4px; }
-.card-value { font-size: 1.15rem; font-weight: 600; color: #f5f5f7; }
-.card-sub { font-size: 0.75rem; color: #8e8e93; margin-top: 2px; }
-.pill { display: inline-block; border-radius: 999px; padding: 4px 12px;
-        font-size: 0.85rem; font-weight: 600; }
-.sec { font-size: 0.95rem; font-weight: 600; color: #f5f5f7; margin: 22px 0 10px; }
-.sb { margin-bottom: 12px; }
-.sb-top { display: flex; justify-content: space-between; font-size: 0.85rem; }
-.sb-track { height: 6px; background: #2c2c2e; border-radius: 3px; margin-top: 5px; }
-.sb-fill { height: 6px; border-radius: 3px; }
-.sb-note { font-size: 0.75rem; color: #8e8e93; margin-top: 4px; }
-.reason { font-size: 0.85rem; color: #ebebf5; padding: 6px 0; border-bottom: 1px solid #2c2c2e; }
-.stButton button { background: #0a84ff !important; color: #fff !important; border: none !important;
-                   border-radius: 10px !important; font-weight: 600 !important; }
-</style>
-""", unsafe_allow_html=True)
+apply_style()
 
-VERDICT_COLORS = {"valido": "#30d158", "osservazione": "#ff9f0a", "scartato": "#ff453a"}
+VERDICT_COLORS = {"valido": GREEN, "osservazione": ORANGE, "scartato": RED}
 
 
 
@@ -388,32 +364,15 @@ def get_fmp_key() -> str:
 
 # ── Formattazione ─────────────────────────────────────────────────────────────
 def money(value, cur):
-    return "—" if value is None else f"{value:,.2f} {cur}"
+    return "—" if value is None else f"{value:,.2f} {cur}".strip()
 
 
 def pct(value):
     return "—" if value is None else f"{value:+.2f}%"
 
 
-def card(label, value, sub="", color="#f5f5f7"):
-    sub_html = f"<div class='card-sub'>{sub}</div>" if sub else ""
-    return (f"<div class='card'><div class='card-label'>{label}</div>"
-            f"<div class='card-value' style='color:{color}'>{value}</div>{sub_html}</div>")
-
-
-def score_bar(label, score, note):
-    if score is None:
-        value, width, color = "n.d.", 0, "#3a3a3c"
-    else:
-        value, width = f"{score:.0f}/100", score
-        color = "#30d158" if score >= 65 else "#ff9f0a" if score >= 50 else "#ff453a"
-    return (f"<div class='sb'><div class='sb-top'><span>{label}</span><span>{value}</span></div>"
-            f"<div class='sb-track'><div class='sb-fill' style='width:{width}%;background:{color}'></div></div>"
-            f"<div class='sb-note'>{note}</div></div>")
-
-
 def tone_color(tone):
-    return "#30d158" if tone >= 0.15 else "#ff453a" if tone <= -0.15 else "#8e8e93"
+    return GREEN if tone >= 0.15 else RED if tone <= -0.15 else "rgba(235,235,245,0.3)"
 
 
 def sentiment_note(r: dict) -> str:
@@ -430,143 +389,155 @@ def sentiment_note(r: dict) -> str:
     return " · ".join(parts) or "Dati di sentiment non disponibili"
 
 
+def months_text(plan) -> str:
+    return (f"{plan['months_low']}–{plan['months_high']} mesi"
+            if plan and plan.get("months_low") is not None else "—")
+
+
+STAGE_NAMES = {"2-iniziale": "Stadio 2 iniziale", "2-in-corso": "Stadio 2 in corso",
+               "2-esteso": "Stadio 2 esteso", "2-pausa": "Stadio 2 in pausa",
+               "2-correzione": "Stadio 2 in correzione", "1-uscita": "Stadio 1 in uscita",
+               "1-base": "Stadio 1 base"}
+# Titoli indicativi per borsa: servono solo a stimare la durata della ricerca
+APPROX_COUNTS = {"Milano": 40, "Francoforte (Xetra)": 140, "Parigi": 40, "Londra": 350, "Amsterdam": 50,
+                 "Madrid": 35, "Zurigo": 20, "Bruxelles": 20, "Lisbona": 18, "Vienna": 20, "Dublino": 20,
+                 "Stoccolma": 30, "Copenaghen": 25, "Helsinki": 25, "Oslo": 25, "Varsavia": 21,
+                 "S&P 500 (USA)": 503}
+
+
+# ── Scheda di un titolo ───────────────────────────────────────────────────────
 def render_result(r: dict):
-    cur = r.get("currency", "")
-    color = VERDICT_COLORS.get(r["verdict"], "#8e8e93")
-    composite = f"Punteggio {r['composite']:.0f}/100" if r.get("composite") is not None else ""
-    price_html = (f"<div style='font-size:2.2rem;font-weight:700;line-height:1.2'>{money(r['price'], cur)}</div>"
-                  if r.get("price") is not None else "")
-    st.markdown(f"""
-    <div style='margin-top:8px'>
-      <div style='color:#8e8e93;font-size:0.9rem'>{r['ticker']} — {r['name']}</div>
-      {price_html}
-      <div style='margin-top:8px'>
-        <span class='pill' style='background:{color}22;color:{color};border:1px solid {color}66'>{r['verdict_label']}</span>
-        <span style='color:#8e8e93;font-size:0.85rem;margin-left:8px'>{composite}</span>
-      </div>
-    </div>""", unsafe_allow_html=True)
+    cur = r.get("currency") or ""
+    color = VERDICT_COLORS.get(r["verdict"], LABEL2)
+    price = (f"<div class='ios-hero-price'>{r['price']:,.2f} <span class='ios-hero-cur'>{esc(cur)}</span></div>"
+             if r.get("price") is not None else "")
+    score = (f"<span style='color:{LABEL2};font-size:15px;margin-left:10px'>Punteggio {r['composite']:.0f}</span>"
+             if r.get("composite") is not None else "")
+    st.markdown(f"<div class='ios-card'><div style='margin-bottom:6px'><span class='ios-chip'>{esc(r['ticker'])}</span>"
+                f"<span style='color:{LABEL2};font-size:15px'>{esc(r['name'])}</span></div>{price}"
+                f"<div style='margin-top:10px'>{badge(r['verdict_label'], color)}{score}</div></div>",
+                unsafe_allow_html=True)
 
     plan = r.get("plan")
     if plan:
         operative = r["verdict"] != "scartato"
-        st.markdown("<div class='sec'>Piano operativo</div>" if operative else
-                    "<div class='sec'>Piano indicativo</div><div class='card-sub'>"
-                    "Il titolo non supera i filtri: i livelli sono mostrati solo per trasparenza.</div>",
-                    unsafe_allow_html=True)
-        c1, c2, c3 = st.columns(3)
-        c1.markdown(card("Entrata", money(plan["entry"], cur), plan["order"]), unsafe_allow_html=True)
-        c2.markdown(card("Stop", money(plan["stop"], cur), f"Perdita massima {pct(plan['max_loss_pct'])}",
-                         "#ff453a"), unsafe_allow_html=True)
-        c3.markdown(card("Target", money(plan["target"], cur), plan["target_basis"], "#30d158"),
-                    unsafe_allow_html=True)
-        c1, c2, c3 = st.columns(3)
-        c1.markdown(card("Ritorno lordo", pct(plan["gross_pct"]),
-                         f"Netto dopo il 26%: {pct(plan['net_pct'])}"), unsafe_allow_html=True)
-        months = (f"{plan['months_low']}–{plan['months_high']} mesi"
-                  if plan.get("months_low") is not None else "—")
-        exit_date = (f"Esci comunque entro il {pd.Timestamp(plan['time_stop_date']).strftime('%d/%m/%Y')}"
+        section("Piano" if operative else "Piano indicativo",
+                plan["setup"] if operative else "Il titolo non supera i filtri: livelli mostrati solo per trasparenza.")
+        exit_date = (f"Uscita a tempo entro il {pd.Timestamp(plan['time_stop_date']).strftime('%d/%m/%Y')}"
                      if plan.get("time_stop_date") else "")
-        c2.markdown(card("Tempo stimato", months, exit_date), unsafe_allow_html=True)
-        rr_color = "#30d158" if plan["rr"] >= MIN_RR else "#ff453a"
-        c3.markdown(card("Rendimento/rischio", f"{plan['rr']:.1f}",
-                         f"Minimo richiesto {MIN_RR:.0f}", rr_color), unsafe_allow_html=True)
-        st.markdown(f"<div class='card-sub'>Tipo di entrata: {plan['setup']}</div>",
-                    unsafe_allow_html=True)
+        tiles([
+            ("Entrata", money(plan["entry"], cur), plan["order"], LABEL),
+            ("Stop", money(plan["stop"], cur), f"Perdita massima {pct(plan['max_loss_pct'])}", RED),
+            ("Target", money(plan["target"], cur), plan["target_basis"], GREEN),
+            ("Ritorno netto", pct(plan["net_pct"]), f"Lordo {pct(plan['gross_pct'])}",
+             GREEN if plan["net_pct"] > 0 else RED),
+            ("Tempo stimato", months_text(plan), exit_date, LABEL),
+            ("Rendimento/rischio", f"{plan['rr']:.1f}", f"Minimo richiesto {MIN_RR:.0f}",
+             GREEN if plan["rr"] >= MIN_RR else RED),
+        ])
 
     if r.get("exclusions"):
-        st.markdown("<div class='sec'>Perché è scartato</div>", unsafe_allow_html=True)
-        st.markdown("".join(f"<div class='reason'>{x}</div>" for x in r["exclusions"]),
-                    unsafe_allow_html=True)
+        section("Perché è scartato")
+        list_rows([(x, "", RED) for x in r["exclusions"]])
     if r.get("warnings"):
-        st.markdown("<div class='sec'>Da sapere</div>", unsafe_allow_html=True)
-        st.markdown("".join(f"<div class='reason'>{x}</div>" for x in r["warnings"]),
-                    unsafe_allow_html=True)
+        section("Da sapere")
+        list_rows([(x, "", ORANGE) for x in r["warnings"]])
 
-    s, lab = r.get("scores", {}), r.get("labels", {})
+    s, lab = r.get("scores") or {}, r.get("labels") or {}
     if s:
-        st.markdown("<div class='sec'>Punteggi</div>", unsafe_allow_html=True)
-        st.markdown(
-            score_bar("Fondamentali (peso 20%)", s.get("fundamentals"), lab.get("valuation", ""))
-            + score_bar("Trend di mercato (peso 15%)", s.get("trend"),
-                        f"{lab.get('index', '')}: {lab.get('regime', '')}")
-            + score_bar("Trend di settore (peso 15%)", s.get("sector"),
-                        (f"{lab.get('sector')}: {lab.get('sector_regime', '')}"
-                         + (f" · {lab.get('sector_source')}" if lab.get("sector_source") else ""))
-                        if lab.get("sector") else "Settore non disponibile")
-            + score_bar("Grafico (peso 40%)", s.get("chart"), lab.get("stage", ""))
-            + score_bar("Sentiment (peso 10%)", s.get("sentiment"), sentiment_note(r)),
-            unsafe_allow_html=True)
+        section("Punteggi", "Da 0 a 100, con il peso di ciascuno nel punteggio finale")
+        sector_note = ((f"{lab.get('sector')}: {lab.get('sector_regime', '')}"
+                        + (f" · {lab.get('sector_source')}" if lab.get("sector_source") else ""))
+                       if lab.get("sector") else "Settore non disponibile")
+        score_rows([
+            ("Grafico", int(WEIGHTS["chart"] * 100), s.get("chart"), lab.get("stage", "")),
+            ("Fondamentali", int(WEIGHTS["fundamentals"] * 100), s.get("fundamentals"), lab.get("valuation", "")),
+            ("Trend di mercato", int(WEIGHTS["trend"] * 100), s.get("trend"),
+             f"{lab.get('index', '')}: {lab.get('regime', '')}"),
+            ("Trend di settore", int(WEIGHTS["sector"] * 100), s.get("sector"), sector_note),
+            ("Sentiment", int(WEIGHTS["sentiment"] * 100), s.get("sentiment"), sentiment_note(r)),
+        ])
 
     d = r.get("details") or {}
     if d.get("headlines"):
-        st.markdown("<div class='sec'>Notizie recenti analizzate</div>", unsafe_allow_html=True)
-        st.markdown("".join(
-            f"<div class='reason'><span style='color:{tone_color(h['tone'])}'>●</span> "
-            f"{html.escape(h['title'])} <span class='card-sub'>{html.escape(h.get('publisher') or '')}</span></div>"
-            for h in d["headlines"]), unsafe_allow_html=True)
+        section("Notizie recenti", "Il tono di ogni titolo è valutato automaticamente")
+        list_rows([(h["title"], h.get("publisher") or "", tone_color(h["tone"])) for h in d["headlines"]])
     if r.get("polymarket"):
-        st.markdown("<div class='sec'>Polymarket (solo informativo, non entra nel punteggio)</div>",
-                    unsafe_allow_html=True)
-        for m in r["polymarket"]:
-            odds = " · ".join(f"{html.escape(str(o))} {p * 100:.0f}%" for o, p in m["outcomes"])
-            st.markdown(f"<div class='reason'>{html.escape(m['question'])}<br><span class='card-sub'>"
-                        f"{odds} · scadenza {m['end'] or 'n.d.'} · volume {m['volume']:,.0f} $</span></div>",
-                        unsafe_allow_html=True)
+        section("Polymarket", "Solo informativo: non entra nel punteggio")
+        list_rows([(m["question"],
+                    " · ".join(f"{o} {p * 100:.0f}%" for o, p in m["outcomes"])
+                    + f" · scadenza {m['end'] or 'n.d.'} · volume {m['volume']:,.0f} $", BLUE)
+                   for m in r["polymarket"]])
+
     if d:
         with st.expander("Come è stato calcolato"):
             def num(v, dec=2, suffix=""):
                 return "n.d." if v is None else f"{v:,.{dec}f}{suffix}"
             rows = [
-                ("Settore", d.get("sector", "n.d."), ""),
-                ("P/E", num(d.get("pe"), 1), f"riferimento settore {num(d.get('pe_ref'), 0)}"),
-                ("EV/EBITDA", num(d.get("ev_ebitda"), 1), f"riferimento settore {num(d.get('ev_ebitda_ref'), 0)}"),
-                ("P/B", num(d.get("pb"), 2), f"riferimento settore {num(d.get('pb_ref'), 1)}"),
-                ("Rendimento free cash flow", num(d.get("fcf_yield"), 1, "%"), ""),
+                ("Settore", d.get("sector", "n.d."), d.get("sector_raw") or ""),
+                ("P/E", num(d.get("pe"), 1), f"riferimento di settore {num(d.get('pe_ref'), 0)}"),
+                ("EV/EBITDA", num(d.get("ev_ebitda"), 1), f"riferimento di settore {num(d.get('ev_ebitda_ref'), 0)}"),
+                ("P/B", num(d.get("pb"), 2), f"riferimento di settore {num(d.get('pb_ref'), 1)}"),
+                ("Rendimento del free cash flow", num(d.get("fcf_yield"), 1, "%"), ""),
                 ("Margine netto", num(d.get("margin"), 1, "%"), ""),
                 ("ROE", num(d.get("roe"), 1, "%"), ""),
-                ("Crescita ricavi", num(d.get("growth"), 1, "%"), ""),
+                ("Crescita dei ricavi", num(d.get("growth"), 1, "%"), ""),
                 ("Debito/patrimonio", num(d.get("debt_equity"), 2), ""),
-                ("Target medio analisti", num(d.get("analyst_target"), 2),
-                 f"{d.get('n_analysts', 0)} analisti"),
-                ("Forza relativa 3 mesi", num(d.get("relative_strength"), 1, " punti %"),
-                 "rendimento del titolo meno quello dell'indice"),
-                ("Settore (fonte indice)", d.get("sector_raw") or "n.d.", ""),
-                ("Tono delle notizie", num(d.get("news_tone"), 2),
-                 f"{d.get('news_count', 0)} titoli, scala da -1 a +1"),
+                ("Target medio analisti", num(d.get("analyst_target"), 2), f"{d.get('n_analysts', 0)} analisti"),
                 ("Giudizio medio analisti", num(d.get("recommendation_mean"), 2), "1 = acquisto forte, 5 = vendita"),
-                ("Short interest", num(d.get("short_pct"), 1, "%"), "quota di azioni vendute allo scoperto"),
-                ("Forza relativa vs settore 3 mesi", num(d.get("sector_relative_strength"), 1, " punti %"),
-                 "rendimento del titolo meno quello del settore"),
+                ("Short interest", num(d.get("short_pct"), 1, "%"), "azioni vendute allo scoperto"),
+                ("Tono delle notizie", num(d.get("news_tone"), 2), f"{d.get('news_count', 0)} titoli, da -1 a +1"),
+                ("Forza relativa vs indice", num(d.get("relative_strength"), 1, " punti"), "ultimi 3 mesi"),
+                ("Forza relativa vs settore", num(d.get("sector_relative_strength"), 1, " punti"), "ultimi 3 mesi"),
                 ("RSI 14", num(d.get("rsi"), 0), ""),
                 ("ATR 14", num(d.get("atr"), 2), "oscillazione media giornaliera"),
-                ("Media 20 giorni", num(d.get("ma20"), 2), ""),
-                ("Media 150 giorni", num(d.get("ma150"), 2),
-                 f"pendenza {num(d.get('ma150_slope'), 1, '%')} in 20 sedute"),
+                ("Media a 20 giorni", num(d.get("ma20"), 2), ""),
+                ("Media a 150 giorni", num(d.get("ma150"), 2), f"pendenza {num(d.get('ma150_slope'), 1, '%')} in 20 sedute"),
                 ("Base recente", f"{num(d.get('base_low'))} – {num(d.get('base_high'))}", "ultime 40 sedute"),
-                ("Massimo 52 settimane", num(d.get("high_52w"), 2), ""),
+                ("Massimo a 52 settimane", num(d.get("high_52w"), 2), ""),
             ]
-            st.dataframe(pd.DataFrame(rows, columns=["Dato", "Valore", "Nota"]),
-                         hide_index=True, width="stretch")
+            list_rows([(f"{name}: {value}", note, None) for name, value, note in rows])
+
+
+# ── Selezione dei mercati (pillole) ──────────────────────────────────────────
+def _set_state(key, value):
+    st.session_state[key] = value
+
+
+def market_picker(prefix: str, default_eu, default_us):
+    for key, default in ((f"{prefix}_eu", default_eu), (f"{prefix}_us", default_us)):
+        if key not in st.session_state:
+            st.session_state[key] = list(default)
+    st.pills("Europa", EUROPE_EXCHANGES, selection_mode="multi", key=f"{prefix}_eu")
+    c1, c2, _ = st.columns([1.2, 1, 2.5])
+    c1.button("Tutta l'Europa", key=f"{prefix}_all", on_click=_set_state,
+              args=(f"{prefix}_eu", list(EUROPE_EXCHANGES)), width="stretch")
+    c2.button("Nessuna", key=f"{prefix}_none", on_click=_set_state, args=(f"{prefix}_eu", []), width="stretch")
+    st.pills("Stati Uniti", US_UNIVERSES, selection_mode="multi", key=f"{prefix}_us",
+             format_func=lambda x: x.replace(" (USA)", ""))
+    eu = st.session_state.get(f"{prefix}_eu") or []
+    us = st.session_state.get(f"{prefix}_us") or []
+    return eu, us, sum(APPROX_COUNTS.get(x, 0) for x in eu + us)
+
+
+def segmented(label: str, options, default, key: str, **kw):
+    if key not in st.session_state:
+        st.session_state[key] = default
+    return st.segmented_control(label, options, key=key, required=True, **kw) or default
 
 
 # ── Pagina ────────────────────────────────────────────────────────────────────
 try:
-    st.page_link("app.py", label="Torna a Stock Viewer", icon="📈")
+    st.page_link("app.py", label="Stock Viewer", icon=":material/chevron_left:")
 except Exception:
-    st.markdown("[📈 Torna a Stock Viewer](/)")
-st.markdown("## 🎯 Opportunità")
-st.markdown(
-    "<div style='color:#8e8e93;font-size:0.9rem;margin-bottom:12px'>"
-    "Titoli sottovalutati rispetto al settore con un grafico favorevole, "
-    f"per operazioni da 1 a {HORIZON_MAX_DAYS // 21} mesi.</div>",
-    unsafe_allow_html=True)
+    st.markdown("[‹ Stock Viewer](/)")
+large_title("Opportunità", "Titoli sottovalutati con un grafico favorevole, per operazioni da 1 a 6 mesi.")
+view = segmented("Sezione", ["Cerca", "Analizza", "Backtest"], "Cerca", "view", label_visibility="collapsed")
 
-tab_single, tab_scan, tab_backtest = st.tabs(["Analizza un titolo", "Scansiona gli indici", "Backtest"])
 
-with tab_single:
-    query = st.text_input("Titolo", placeholder="Nome o ticker: Apple, Leonardo, AAPL, ENI.MI…",
-                          label_visibility="collapsed").strip()
-    ticker = None
+if view == "Analizza":
+    query = st.text_input("Titolo", placeholder="Cerca un'azienda o un ticker",
+                          label_visibility="collapsed", key="single_q").strip()
     if query:
         looks_like_ticker = " " not in query and query == query.upper() and len(query) <= 12
         result = cached_analysis(query, get_fmp_key()) if looks_like_ticker else None
@@ -579,34 +550,33 @@ with tab_single:
             if matches:
                 labels = [f"{m['name']} — {m['symbol']}" + (f" ({m['exchange']})" if m["exchange"] else "")
                           for m in matches]
-                choice = st.selectbox("Scegli il titolo", labels)
+                choice = st.selectbox("Risultati", labels)
                 ticker = matches[labels.index(choice)]["symbol"]
                 with st.spinner(f"Analizzo {ticker}…"):
                     render_result(cached_analysis(ticker, get_fmp_key()))
             else:
-                st.caption("Nessun titolo trovato. Prova con il nome dell'azienda o con il ticker "
-                           "completo di borsa, per esempio AAPL o ENI.MI.")
+                footnote("Nessun titolo trovato. Prova con il nome dell'azienda o con il ticker completo di borsa, "
+                         "per esempio AAPL o ENI.MI.")
     else:
-        st.caption("Scrivi il nome dell'azienda o il ticker.")
+        footnote("Scrivi il nome di un'azienda, per esempio Ferrari, oppure il ticker, per esempio RACE.MI.")
 
-with tab_scan:
-    st.markdown("<div class='card-sub' style='margin-bottom:6px'>Per ogni borsa europea si usano "
-                "i titoli dei suoi indici principali, letti da Wikipedia.</div>",
-                unsafe_allow_html=True)
-    all_europe = st.checkbox("Tutta l'Europa (16 borse)")
-    exchanges = st.multiselect("Borse europee", list(EXCHANGES), default=[],
-                               disabled=all_europe, placeholder="Scegli una o più borse")
-    chosen = st.multiselect("Indici USA", US_UNIVERSES, default=["S&P 500 (USA)"])
-    extra = st.text_input("Altri ticker (facoltativo)",
-                          placeholder="Separati da virgola, es. BC.MI, ASML.AS, NOVO-B.CO")
-    if all_europe:
-        st.caption("Tutta l'Europa sono circa 800 titoli: la scansione richiede alcuni minuti.")
 
-    if st.button("Scansiona"):
+elif view == "Cerca":
+    with st.container(border=True):
+        eu, us, approx = market_picker("scan", [], ["S&P 500 (USA)"])
+        extra = st.text_input("Altri ticker (facoltativo)", placeholder="Separati da virgola, es. BC.MI, ASML.AS",
+                              key="scan_extra")
+        n_markets = len(eu) + len(us)
+        footnote(f"{n_markets} {'mercato selezionato' if n_markets == 1 else 'mercati selezionati'} · circa {approx} titoli"
+                 + (" · qualche minuto" if approx > 300 else "") if n_markets else "Scegli almeno un mercato.")
+        run = st.button("Cerca opportunità", type="primary", key="scan_run", width="stretch",
+                        disabled=not (n_markets or extra.strip()))
+
+    if run:
         tickers, failed, sources, raw_sectors = [], {}, {}, {}
         status = st.empty()
-        jobs = [(n, lambda n=n: load_exchange(n)) for n in (EUROPE_EXCHANGES if all_europe else exchanges)]
-        jobs += [(n, lambda n=n: load_universe(n)) for n in chosen]
+        jobs = [(n, lambda n=n: load_exchange(n)) for n in eu]
+        jobs += [(n, lambda n=n: load_universe(n)) for n in us]
         for name, load in jobs:
             status.caption(f"Leggo l'elenco di {name}…")
             symbols, source, error, sectors = load()
@@ -620,20 +590,17 @@ with tab_scan:
         tickers += [t.strip().upper() for t in extra.split(",") if t.strip()]
         tickers = list(dict.fromkeys(tickers))
         if failed:
-            st.warning("Elenco non disponibile per: " + ", ".join(failed) +
-                       ". Riprova tra qualche minuto, oppure aggiungi i ticker a mano.")
-            with st.expander("Dettagli tecnici dell'errore"):
-                for name, error in failed.items():
-                    st.markdown(f"<div class='reason'><b>{name}</b>: {error}</div>",
-                                unsafe_allow_html=True)
+            st.warning("Elenco non disponibile per: " + ", ".join(failed) + ". Riprova tra qualche minuto.")
+            with st.expander("Dettagli dell'errore"):
+                list_rows([(name, error, RED) for name, error in failed.items()])
 
         if tickers:
             fmp_key = get_fmp_key()
             groups = {tuple(index_candidates_for(t)) for t in tickers}
             index_map = {g: cached_resolved_index(g) for g in groups}
-            progress = st.progress(0.0, text=f"Passaggio 1 di 2: scarico i prezzi di {len(tickers)} titoli…")
+            progress = st.progress(0.0, text=f"Scarico i prezzi di {len(tickers)} titoli…")
             hists = bulk_history(tickers, on_progress=lambda done, total: progress.progress(
-                done / total * 0.5, text=f"Passaggio 1 di 2: prezzi scaricati per {done} di {total} titoli"))
+                done / total * 0.5, text=f"Prezzi scaricati per {done} di {total} titoli"))
 
             results, survivors = [], []
             for t in tickers:
@@ -648,14 +615,11 @@ with tab_scan:
                     survivors.append(t)
 
             if survivors:
-                # Trend di settore: ETF di riferimento scaricati in blocco...
-                etfs = sorted({b["etf"] for t in survivors
-                               if (b := sector_benchmark(t, raw_sectors.get(t)))})
+                etfs = sorted({b["etf"] for t in survivors if (b := sector_benchmark(t, raw_sectors.get(t)))})
                 if etfs:
                     progress.progress(0.5, text=f"Scarico l'andamento di {len(etfs)} settori…")
                     for symbol, etf_hist in bulk_history(etfs).items():
                         _SECTOR_HISTORY[symbol] = (time.time(), etf_hist)
-                # ...e, come riserva, la media dei titoli dello stesso settore (almeno 5)
                 groups_hist = {}
                 for t, h in hists.items():
                     canonical = canonical_sector(raw_sectors.get(t))
@@ -668,163 +632,173 @@ with tab_scan:
                         if not avg.empty:
                             peers[group] = (avg, len(members))
 
-                progress.progress(0.5, text=f"Passaggio 2 di 2: analizzo i fondamentali di {len(survivors)} titoli…")
+                progress.progress(0.5, text=f"Analizzo {len(survivors)} titoli promettenti…")
                 with cf.ThreadPoolExecutor(max_workers=3) as pool:
                     futures = []
                     for t in survivors:
                         idx_symbol, idx_hist = index_map[tuple(index_candidates_for(t))]
-                        futures.append(pool.submit(analyze_with_history, t, hists[t],
-                                                   idx_hist, idx_symbol, fmp_key,
-                                                   raw_sectors.get(t), peers))
+                        futures.append(pool.submit(analyze_with_history, t, hists[t], idx_hist, idx_symbol,
+                                                   fmp_key, raw_sectors.get(t), peers))
                     for i, fut in enumerate(cf.as_completed(futures), start=1):
                         results.append(fut.result())
                         progress.progress(0.5 + 0.5 * i / len(survivors),
-                                          text=f"Passaggio 2 di 2: {i} di {len(survivors)} titoli")
+                                          text=f"Analizzati {i} di {len(survivors)} titoli promettenti")
             progress.empty()
             st.session_state["scan_results"] = sorted(results, key=sort_key)
             st.session_state["scan_sources"] = sources
-
-    sources = st.session_state.get("scan_sources")
-    if sources:
-        st.caption("Elenchi caricati: " + " · ".join(f"{k} {v}" for k, v in sources.items()))
 
     results = st.session_state.get("scan_results")
     if results:
         not_loaded = [r for r in results if r.get("exclusions", [None])[:1] == [DOWNLOAD_FAILED]]
         selected = [r for r in results if r["verdict"] != "scartato"]
         rejected = [r for r in results if r["verdict"] == "scartato" and r not in not_loaded]
+        section(f"{len(selected)} opportunità",
+                f"Su {len(results) - len(not_loaded)} titoli analizzati, dal punteggio più alto.")
         if not_loaded:
-            st.warning(f"{len(not_loaded)} titoli non analizzati perché Yahoo ha limitato le richieste. "
-                       "Rilancia la scansione tra qualche minuto: i titoli già scaricati restano in memoria "
-                       "e la seconda volta è più veloce.")
-        st.markdown(f"<div class='sec'>{len(selected)} titoli selezionati su {len(results) - len(not_loaded)} analizzati</div>",
-                    unsafe_allow_html=True)
+            st.warning(f"{len(not_loaded)} titoli non analizzati perché Yahoo ha limitato le richieste: "
+                       "rilancia la ricerca tra qualche minuto.")
         if selected:
-            table = pd.DataFrame([{
-                "Titolo": r["ticker"],
-                "Nome": (r["name"] or "")[:28],
-                "Esito": r["verdict_label"],
-                "Punteggio": r["composite"],
-                "Entrata": r["plan"]["entry"],
-                "Stop": r["plan"]["stop"],
-                "Target": r["plan"]["target"],
-                "Netto %": r["plan"]["net_pct"],
-                "Mesi": (f"{r['plan']['months_low']}–{r['plan']['months_high']}"
-                         if r["plan"].get("months_low") is not None else "—"),
-                "R/R": r["plan"]["rr"],
-            } for r in selected])
-            st.dataframe(table, hide_index=True, width="stretch", column_config={
-                "Punteggio": st.column_config.NumberColumn(format="%.0f"),
-                "Entrata": st.column_config.NumberColumn(format="%.2f"),
-                "Stop": st.column_config.NumberColumn(format="%.2f"),
-                "Target": st.column_config.NumberColumn(format="%.2f"),
-                "Netto %": st.column_config.NumberColumn(format="%+.2f"),
-                "R/R": st.column_config.NumberColumn(format="%.1f"),
-            })
-            choice = st.selectbox("Vedi il dettaglio", [f"{r['ticker']} — {r['name']}" for r in selected])
-            render_result(selected[[f"{r['ticker']} — {r['name']}" for r in selected].index(choice)])
+            mode = segmented("Vista", ["Elenco", "Tabella"], "Elenco", "res_mode", label_visibility="collapsed")
+            if mode == "Elenco":
+                rows = ""
+                for r in selected:
+                    p = r["plan"]
+                    net_color = GREEN if p["net_pct"] > 0 else RED
+                    rows += (f"<div class='ios-row' style='display:flex;justify-content:space-between;gap:12px'>"
+                             f"<div><span class='ios-dot' style='background:{VERDICT_COLORS[r['verdict']]}'></span>"
+                             f"<b>{esc(r['ticker'])}</b> <span style='color:{LABEL2}'>{esc((r['name'] or '')[:30])}</span>"
+                             f"<span class='sub'>Entrata {p['entry']:,.2f} · Target {p['target']:,.2f} · "
+                             f"{months_text(p)} · punteggio {r['composite']:.0f}</span></div>"
+                             f"<div style='text-align:right;white-space:nowrap'><span style='color:{net_color};"
+                             f"font-weight:600'>{p['net_pct']:+.1f}%</span><span class='sub'>netto</span></div></div>")
+                st.markdown(f"<div class='ios-list'>{rows}</div>", unsafe_allow_html=True)
+            else:
+                html_table(pd.DataFrame([{
+                    "Titolo": r["ticker"], "Esito": r["verdict_label"], "Punteggio": r["composite"],
+                    "Entrata": r["plan"]["entry"], "Stop": r["plan"]["stop"], "Target": r["plan"]["target"],
+                    "Netto %": r["plan"]["net_pct"], "Tempo": months_text(r["plan"]), "R/R": r["plan"]["rr"],
+                } for r in selected]), formats={
+                    "Punteggio": lambda v: f"{v:.0f}", "Entrata": lambda v: f"{v:,.2f}",
+                    "Stop": lambda v: f"{v:,.2f}", "Target": lambda v: f"{v:,.2f}",
+                    "Netto %": lambda v: f"{v:+.2f}%", "R/R": lambda v: f"{v:.1f}"},
+                    colors={"Netto %": lambda v: GREEN if v > 0 else RED})
+
+            section("Dettaglio")
+            options = [f"{r['ticker']} — {r['name']}" for r in selected]
+            choice = st.selectbox("Titolo", options, label_visibility="collapsed", key="detail_pick")
+            render_result(selected[options.index(choice)])
         else:
-            st.caption("Nessun titolo supera i filtri in questo momento.")
+            footnote("Nessun titolo supera tutti i filtri in questo momento.")
 
+        if st.session_state.get("scan_sources"):
+            footnote("Elenchi letti: " + " · ".join(f"{k} {v}" for k, v in st.session_state["scan_sources"].items()))
         if rejected:
-            with st.expander(f"Scartati ({len(rejected)}): motivi principali"):
-                main_reasons = Counter(re.sub(r"[-+]?\d[\d.,]*", "…", r["exclusions"][0])
-                                       for r in rejected if r.get("exclusions"))
-                st.dataframe(pd.DataFrame(main_reasons.most_common(), columns=["Motivo", "Titoli"]),
-                             hide_index=True, width="stretch")
-                st.dataframe(pd.DataFrame([{"Titolo": r["ticker"],
-                                            "Motivo": r["exclusions"][0] if r.get("exclusions") else "—"}
-                                           for r in rejected]),
-                             hide_index=True, width="stretch")
-
-STAGE_NAMES = {"2-iniziale": "Stadio 2 iniziale", "2-in-corso": "Stadio 2 in corso",
-               "2-esteso": "Stadio 2 esteso", "2-pausa": "Stadio 2 in pausa",
-               "2-correzione": "Stadio 2 in correzione", "1-uscita": "Stadio 1 in uscita",
-               "1-base": "Stadio 1 base"}
+            with st.expander(f"Titoli scartati ({len(rejected)}) e motivi"):
+                reasons = Counter(re.sub(r"[-+]?\d[\d.,]*", "…", r["exclusions"][0])
+                                  for r in rejected if r.get("exclusions"))
+                html_table(pd.DataFrame(reasons.most_common(), columns=["Motivo", "Titoli"]))
+                list_rows([(r["ticker"], r["exclusions"][0] if r.get("exclusions") else "", None)
+                           for r in rejected])
 
 
+# ── Backtest ──────────────────────────────────────────────────────────────────
 def render_backtest(bt: dict):
     trades, counts = bt["trades"], bt["counts"]
-    st.markdown("<div class='sec'>Risultati</div>", unsafe_allow_html=True)
-    st.caption(f"{bt['n_tickers']} titoli, ultimi {bt['years']} anni · {counts['segnali']} segnali, "
-               f"{counts['non_eseguiti']} ordini mai eseguiti · trend di settore disponibile per "
-               f"{bt['sector_coverage']} titoli")
+    caption = (f"{bt['n_tickers']} titoli, {bt['years']} {'anno' if bt['years'] == 1 else 'anni'} · "
+               f"{counts['segnali']} segnali, {counts['non_eseguiti']} ordini mai eseguiti · "
+               f"trend di settore per {bt['sector_coverage']} titoli")
+    if counts.get("saltati"):
+        caption += f" · {counts['saltati']} controlli saltati per dati anomali"
+    section("Risultati", caption)
     summary = summarize(trades) if not trades.empty else {"chiuse": 0}
     if summary["chiuse"] == 0:
-        st.info("Nessuna operazione chiusa nel periodo: prova con più borse o un periodo più lungo.")
+        st.info("Nessuna operazione chiusa nel periodo: prova con più mercati o un periodo più lungo.")
         return
 
     extra = summary["extra_vs_indice"]
-    if summary["media_netta"] > 0 and (extra is None or extra > 0):
-        verdict = (f"Nel periodo il modello ha guadagnato in media **{summary['media_netta']:+.2f}%** netto "
-                   "per operazione" + (f", **{extra:+.2f} punti** meglio dell'indice negli stessi giorni." if extra is not None else "."))
-    else:
-        verdict = (f"Nel periodo il modello ha reso in media **{summary['media_netta']:+.2f}%** netto per operazione"
-                   + (f", {extra:+.2f} punti rispetto all'indice negli stessi giorni" if extra is not None else "")
-                   + ": così com'è non avrebbe aggiunto valore.")
-    st.markdown(verdict)
+    good = summary["media_netta"] > 0 and (extra is None or extra > 0)
+    verdict = (f"In media ogni operazione ha reso <b style='color:{GREEN if summary['media_netta'] > 0 else RED}'>"
+               f"{summary['media_netta']:+.2f}%</b> netto"
+               + (f", <b>{extra:+.2f} punti</b> rispetto all'indice negli stessi giorni" if extra is not None else "")
+               + (". Risultato in linea con l'indice: nessun vantaggio chiaro." if extra is not None and abs(extra) <= 0.5
+                  else ". Il modello ha aggiunto valore." if good
+                  else ". Così com'è, il modello non ha aggiunto valore."))
+    st.markdown(f"<div class='ios-callout'>{verdict}</div>", unsafe_allow_html=True)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(card("Operazioni chiuse", f"{summary['chiuse']}", f"{summary['in_corso']} ancora aperte"), unsafe_allow_html=True)
-    c2.markdown(card("In guadagno", f"{summary['win_pct']:.0f}%", f"mediana {summary['mediana_netta']:+.2f}%"), unsafe_allow_html=True)
-    c3.markdown(card("Netto medio", f"{summary['media_netta']:+.2f}%", f"lordo {summary['media_lorda']:+.2f}%",
-                     "#30d158" if summary["media_netta"] > 0 else "#ff453a"), unsafe_allow_html=True)
-    c4.markdown(card("Rispetto all'indice", f"{extra:+.2f} punti" if extra is not None else "n.d.",
-                     "a parità di giorni", "#30d158" if (extra or 0) > 0 else "#ff453a"), unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.markdown(card("Chiuse al target", f"{summary['target_pct']:.0f}%"), unsafe_allow_html=True)
-    c2.markdown(card("Chiuse allo stop", f"{summary['stop_pct']:.0f}%"), unsafe_allow_html=True)
-    c3.markdown(card("Uscite a tempo", f"{summary['scadenza_pct']:.0f}%"), unsafe_allow_html=True)
     in_time = summary["target_nei_tempi_pct"]
-    c4.markdown(card("Durata media", f"{summary['giorni_medi']:.0f} sedute",
-                     f"target entro il tempo stimato: {in_time:.0f}%" if in_time is not None else ""),
-                unsafe_allow_html=True)
+    tiles([
+        ("Operazioni chiuse", f"{summary['chiuse']}", f"{summary['in_corso']} ancora aperte", LABEL),
+        ("In guadagno", f"{summary['win_pct']:.0f}%", f"mediana {summary['mediana_netta']:+.2f}%", LABEL),
+        ("Netto medio", f"{summary['media_netta']:+.2f}%", f"lordo {summary['media_lorda']:+.2f}%",
+         GREEN if summary["media_netta"] > 0 else RED),
+        ("Rispetto all'indice", f"{extra:+.2f}" if extra is not None else "n.d.", "punti, a parità di giorni",
+         GREEN if (extra or 0) > 0 else RED),
+        ("Chiuse al target", f"{summary['target_pct']:.0f}%", "", GREEN),
+        ("Chiuse allo stop", f"{summary['stop_pct']:.0f}%", "", RED),
+        ("Uscite a tempo", f"{summary['scadenza_pct']:.0f}%", "", LABEL),
+        ("Durata media", f"{summary['giorni_medi']:.0f} sedute",
+         f"target nei tempi stimati: {in_time:.0f}%" if in_time is not None else "", LABEL),
+    ], per_row=4)
 
     closed = trades[trades["outcome"] != "in corso"].sort_values("exit_date")
-    st.markdown("<div class='sec'>Andamento cumulato</div>", unsafe_allow_html=True)
-    st.caption("Somma dei rendimenti netti delle operazioni chiuse, a importo uguale per operazione")
-    st.line_chart(closed.set_index("exit_date")["net_pct"].cumsum().rename("Rendimento netto cumulato %"))
+    section("Andamento cumulato", "Somma dei rendimenti netti delle operazioni chiuse, a importo uguale")
+    curve = closed.set_index("exit_date")["net_pct"].cumsum()
+    fig = go.Figure(go.Scatter(x=curve.index, y=curve.values, mode="lines",
+                               line=dict(color=BLUE, width=2.5), fill="tozeroy",
+                               fillcolor="rgba(10,132,255,0.12)"))
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", height=260,
+                      margin=dict(l=0, r=0, t=6, b=0), font=dict(color="rgba(235,235,245,0.6)"),
+                      xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#2c2c2e", ticksuffix="%", side="right"))
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
+    section("Cosa funziona", "Scegli come scomporre i risultati")
     closed = closed.assign(fascia=closed["score"].apply(score_bucket),
                            fase=closed["stage"].map(STAGE_NAMES).fillna("altro"))
-    for title, column in (("Per fascia di punteggio: i punteggi alti rendono di più?", "fascia"),
-                          ("Per tendenza del settore: il filtro del settore aiuta?", "sector_regime"),
-                          ("Per fase del grafico", "fase"), ("Per tipo di entrata", "order")):
-        st.markdown(f"<div class='sec'>{title}</div>", unsafe_allow_html=True)
-        st.dataframe(breakdown(closed, column), width="stretch")
+    by = segmented("Scomposizione", ["Punteggio", "Settore", "Grafico", "Entrata"], "Punteggio", "bt_by",
+                   label_visibility="collapsed")
+    column = {"Punteggio": "fascia", "Settore": "sector_regime", "Grafico": "fase", "Entrata": "order"}[by]
+    table = breakdown(closed, column)
+    table.index.name = {"fascia": "Punteggio", "sector_regime": "Tendenza del settore",
+                        "fase": "Fase del grafico", "order": "Tipo di entrata"}[column]
+    percent = lambda v: f"{v:.0f}%"
+    signed = lambda v: f"{v:+.2f}%"
+    html_table(table, index=True,
+               formats={"Operazioni": lambda v: f"{v:.0f}", "Target %": percent, "Stop %": percent,
+                        "In guadagno %": percent, "Netto medio %": signed, "Extra vs indice %": signed},
+               colors={"Netto medio %": lambda v: GREEN if v > 0 else RED,
+                       "Extra vs indice %": lambda v: GREEN if v > 0 else RED})
 
     with st.expander("Tutte le operazioni"):
-        view = trades.copy()
+        view_df = trades.copy()
         for col in ("signal_date", "fill_date", "exit_date"):
-            view[col] = pd.to_datetime(view[col]).dt.date
-        st.dataframe(view[["ticker", "signal_date", "fill_date", "exit_date", "outcome", "fill_price",
-                           "exit_price", "gross_pct", "net_pct", "excess_pct", "days", "score",
-                           "sector_regime"]].round(2), hide_index=True, width="stretch")
-    st.markdown(
-        "<div class='card-sub'>Limiti da tenere presenti: gli elenchi sono quelli di oggi, quindi mancano le società "
-        "uscite dagli indici o fallite nel frattempo (i risultati sono un po' ottimistici); i settori sono quelli "
-        f"attuali; costi ipotizzati {0.15:.2f}% per lato; imposta del 26% applicata ai soli guadagni, operazione per "
-        "operazione. Fondamentali e sentiment non sono verificati, perché non esiste uno storico gratuito.</div>",
-        unsafe_allow_html=True)
+            view_df[col] = pd.to_datetime(view_df[col]).dt.strftime("%d/%m/%Y")
+        st.dataframe(view_df[["ticker", "signal_date", "fill_date", "exit_date", "outcome", "fill_price",
+                              "exit_price", "gross_pct", "net_pct", "excess_pct", "days", "score",
+                              "sector_regime"]].round(2), hide_index=True, width="stretch")
+    footnote("Limiti: gli elenchi dei titoli sono quelli di oggi, quindi mancano le società uscite dagli indici "
+             "o fallite (risultati un po' ottimistici); i settori sono quelli attuali; costi ipotizzati 0,15% per "
+             "lato; imposta del 26% sui soli guadagni. Fondamentali e sentiment non sono verificabili sul passato.")
 
 
-with tab_backtest:
-    st.markdown("<div class='card-sub' style='margin-bottom:8px'>Applica le regole del modello alle date passate, "
-                "con i soli dati disponibili in quel momento, e segue ogni operazione fino a target, stop o "
-                "uscita a tempo. Verifica grafico, trend di mercato, trend di settore e piano di uscita.</div>",
-                unsafe_allow_html=True)
-    bt_all_europe = st.checkbox("Tutta l'Europa (16 borse)", key="bt_all_europe")
-    bt_exchanges = st.multiselect("Borse europee", list(EXCHANGES), default=["Milano"],
-                                  disabled=bt_all_europe, key="bt_exchanges")
-    bt_us = st.multiselect("Indici USA", US_UNIVERSES, default=[], key="bt_us")
-    c1, c2 = st.columns(2)
-    bt_years = c1.selectbox("Periodo", [1, 2, 3], index=1, key="bt_years",
-                            format_func=lambda y: "Ultimo anno" if y == 1 else f"Ultimi {y} anni")
-    bt_step = c2.selectbox("Controlli", [21, 10], key="bt_step",
-                           format_func=lambda d: "Una volta al mese" if d == 21 else "Ogni due settimane")
-    if st.button("Avvia backtest", key="bt_run"):
+if view == "Backtest":
+    with st.container(border=True):
+        footnote("Il modello rigioca le sue regole sul passato, con i soli dati disponibili in ogni data, e segue "
+                 "ogni operazione fino a target, stop o uscita a tempo.")
+        bt_eu, bt_us, bt_approx = market_picker("bt", ["Milano"], [])
+        c1, c2 = st.columns(2)
+        with c1:
+            period = segmented("Periodo", ["1 anno", "2 anni", "3 anni"], "2 anni", "bt_period")
+        with c2:
+            frequency = segmented("Controlli", ["Ogni mese", "Ogni 2 settimane"], "Ogni mese", "bt_freq")
+        footnote(f"Circa {bt_approx} titoli" + (" · può richiedere diversi minuti" if bt_approx > 300 else ""))
+        run_bt = st.button("Avvia backtest", type="primary", key="bt_run", width="stretch",
+                           disabled=not (bt_eu or bt_us))
+
+    if run_bt:
+        bt_years = int(period.split()[0])
+        bt_step = 21 if frequency == "Ogni mese" else 10
         tickers, raw_sectors = [], {}
-        for name in (EUROPE_EXCHANGES if bt_all_europe else bt_exchanges):
+        for name in bt_eu:
             symbols, _, _, sectors = load_exchange(name)
             tickers += symbols; raw_sectors.update(sectors)
         for name in bt_us:
@@ -832,7 +806,7 @@ with tab_backtest:
             tickers += symbols; raw_sectors.update(sectors)
         tickers = [t for t in dict.fromkeys(tickers) if not looks_like_fund(raw_sectors.get(t))]
         if not tickers:
-            st.warning("Nessun titolo da analizzare: scegli almeno una borsa o un indice.")
+            st.warning("Nessun titolo da analizzare.")
         else:
             progress = st.progress(0.0, text=f"Scarico 5 anni di prezzi per {len(tickers)} titoli…")
             hists = bulk_history(tickers, period="5y", on_progress=lambda done, total: progress.progress(
@@ -866,6 +840,5 @@ with tab_backtest:
     if st.session_state.get("bt"):
         render_backtest(st.session_state["bt"])
 
-st.markdown(
-    "<div class='card-sub' style='margin-top:32px'>Stime basate sui dati storici, non garanzie.</div>",
-    unsafe_allow_html=True)
+st.markdown("<div class='ios-caption' style='margin-top:36px;text-align:center'>"
+            "Stime basate sui dati storici, non garanzie.</div>", unsafe_allow_html=True)

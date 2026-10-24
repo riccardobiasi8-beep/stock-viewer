@@ -112,9 +112,26 @@ def _clean_column(series, suffix):
     return [s for s in dict.fromkeys(symbols) if s]
 
 
+def _read_tables(html: str):
+    """Legge le tabelle una per una: una tabella malformata non blocca le altre."""
+    try:
+        import lxml.html
+        fragments = [lxml.html.tostring(t, encoding="unicode")
+                     for t in lxml.html.fromstring(html).xpath("//table")]
+    except Exception:
+        fragments = [html]
+    tables = []
+    for fragment in fragments:
+        try:
+            tables += pd.read_html(io.StringIO(fragment))
+        except Exception:
+            continue
+    return tables
+
+
 def parse_constituents(html: str, suffix: str, min_size: int = 10, columns=None):
     """Cerca la tabella dei componenti e ne estrae i ticker."""
-    tables = [t for t in pd.read_html(io.StringIO(html)) if len(t) >= min_size]
+    tables = [t for t in _read_tables(html) if len(t) >= min_size]
     names = columns or TICKER_COLUMNS
     # 1) colonne con un nome da ticker
     for table in tables:

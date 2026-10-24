@@ -39,7 +39,8 @@ MIN_LIQUIDITY_EUR = 500_000     # controvalore medio giornaliero minimo
 EARNINGS_WARNING_DAYS = 14      # avviso se la trimestrale è entro 14 giorni
 SLOPE_FLAT_PCT = 0.3            # media 150 gg 'piatta' se varia meno dello 0,3% in 20 sedute
 NEAR_HIGH_PCT = 0.95            # 'vicino ai massimi' = entro il 5% dal massimo a 52 settimane
-WEIGHTS = {"fundamentals": 0.25, "trend": 0.15, "sector": 0.20, "chart": 0.40}
+WEIGHTS = {"fundamentals": 0.20, "trend": 0.15, "sector": 0.15, "chart": 0.40, "sentiment": 0.10}
+NEWS_MAX_AGE_DAYS = 21          # notizie considerate per il tono
 VALID_THRESHOLD = 65
 WATCH_THRESHOLD = 50
 
@@ -536,6 +537,73 @@ def sector_layer(ind: dict, sector) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# LIVELLO 5 — SENTIMENT (notizie, analisti, short interest)
+# Polymarket viene mostrato nel dettaglio ma non entra nel punteggio: le sue domande
+# ("chiuderà sopra X?", "batterà le stime?") non si traducono in un segnale univoco.
+# ══════════════════════════════════════════════════════════════════════════════
+_VADER = None
+
+
+def _news_analyzer():
+    global _VADER
+    if _VADER is None:
+        try:
+            from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+            _VADER = SentimentIntensityAnalyzer()
+        except Exception:
+            _VADER = False
+    return _VADER or None
+
+
+def sentiment_layer(info: dict, news=None, today: pd.Timestamp | None = None) -> dict:
+    """news = [{"title", "publisher", "time" (unix)}] dalla ricerca di Yahoo."""
+    today = today or pd.Timestamp.today()
+    out = {"score": None, "news_score": None, "news_tone": None, "news_count": 0, "headlines": [],
+           "analyst_score": None, "analyst_label": None, "short_score": None, "short_pct": None,
+           "exclusions": [], "warnings": []}
+
+    # 1) Tono delle notizie recenti
+    analyzer = _news_analyzer()
+    recent = []
+    for item in news or []:
+        title = str(item.get("title") or "").strip()
+        ts = _f(item.get("time"))
+        age = (today - pd.Timestamp(ts, unit="s")).days if ts else 0
+        if title and age <= NEWS_MAX_AGE_DAYS:
+            recent.append(item | {"title": title})
+    if analyzer and len(recent) >= 3:
+        scored = [(analyzer.polarity_scores(i["title"])["compound"], i) for i in recent]
+        tone = sum(c for c, _ in scored) / len(scored)
+        out.update(news_tone=tone, news_count=len(scored), news_score=_clamp(50 + tone * 100),
+                   headlines=[{"title": i["title"], "publisher": i.get("publisher", ""),
+                               "tone": round(c, 2)} for c, i in scored[:6]])
+        if tone < -0.15:
+            out["warnings"].append(f"Notizie recenti in prevalenza negative ({len(scored)} titoli analizzati)")
+
+    # 2) Giudizio medio degli analisti (1 = acquisto forte … 5 = vendita forte)
+    rec = _f(info.get("recommendationMean"))
+    n_analysts = int(_f(info.get("numberOfAnalystOpinions")) or 0)
+    if rec and n_analysts >= 3:
+        out["analyst_score"] = _clamp((5 - rec) / 4 * 100)
+        out["analyst_label"] = ("Acquisto forte" if rec <= 1.5 else "Acquisto" if rec <= 2.5 else
+                                "Mantenere" if rec <= 3.5 else "Vendita" if rec <= 4.5 else "Vendita forte")
+        if rec > 3.5:
+            out["warnings"].append(f"Analisti orientati alla vendita ({n_analysts} pareri)")
+
+    # 3) Short interest: molte posizioni ribassiste aperte = mercato scettico
+    short = _f(info.get("shortPercentOfFloat"))
+    if short is not None:
+        short_pct = short * 100 if short < 1 else short
+        out["short_pct"] = short_pct
+        out["short_score"] = _clamp(60 - short_pct * 2)
+        if short_pct > 15:
+            out["warnings"].append(f"Short interest alto ({short_pct:.0f}% delle azioni in circolazione)")
+
+    out["score"] = _mean([out["news_score"], out["analyst_score"], out["short_score"]])
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # LIVELLO 3 — GRAFICO (stadi di Weinstein)
 # ══════════════════════════════════════════════════════════════════════════════
 def weinstein_stage(close: pd.Series, ma150: pd.Series, high_52w: float | None = None):
@@ -704,7 +772,7 @@ def earnings_warning(info: dict, today: pd.Timestamp):
 # ══════════════════════════════════════════════════════════════════════════════
 def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
             index_symbol: str | None = None, today: pd.Timestamp | None = None,
-            sector: dict | None = None) -> dict:
+            sector: dict | None = None, news=None) -> dict:
     today = (today or pd.Timestamp.today()).normalize()
     info = dict(info or {})
     # Il settore letto dagli indici permette i multipli di settore anche senza il riepilogo Yahoo
@@ -737,10 +805,11 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
     fund = fundamentals_layer(info, ind["price"])
     trend = trend_layer(ind, index_hist, index_symbol)
     sector_res = sector_layer(ind, sector)
+    sentiment = sentiment_layer(info, news, today)
     chart = chart_layer(ind)
     plan = trade_plan(ind, info, today)
 
-    for layer in (fund, trend, sector_res, chart, plan):
+    for layer in (fund, trend, sector_res, sentiment, chart, plan):
         result["exclusions"].extend(layer["exclusions"])
         result["warnings"].extend(layer["warnings"])
     earnings = earnings_warning(info, today)
@@ -758,7 +827,7 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
                 "e la valutazione è confrontata con i multipli medi di mercato")
 
     scores = {"fundamentals": fund["score"], "trend": trend["score"],
-              "sector": sector_res["score"], "chart": chart["score"]}
+              "sector": sector_res["score"], "chart": chart["score"], "sentiment": sentiment["score"]}
     weights = {k: w for k, w in WEIGHTS.items() if scores[k] is not None}
     composite = None
     if weights:
@@ -774,6 +843,7 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
             "quality": round(fund["quality_score"], 1) if fund["quality_score"] is not None else None,
             "trend": round(trend["score"], 1) if trend["score"] is not None else None,
             "sector": round(sector_res["score"], 1) if sector_res["score"] is not None else None,
+            "sentiment": round(sentiment["score"], 1) if sentiment["score"] is not None else None,
             "chart": round(chart["score"], 1) if chart["score"] is not None else None,
         },
         "labels": {
@@ -783,6 +853,7 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
             "sector": sector_res["name"],
             "sector_regime": sector_res["regime_label"],
             "sector_source": sector_res["source"],
+            "analysts": sentiment["analyst_label"],
             "stage": chart["stage_label"],
         },
         "plan": plan_public,
@@ -791,6 +862,9 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
             "relative_strength": trend["relative_strength"],
             "sector_relative_strength": sector_res["relative_strength"],
             "sector_raw": (sector or {}).get("raw"),
+            "news_tone": sentiment["news_tone"], "news_count": sentiment["news_count"],
+            "headlines": sentiment["headlines"], "short_pct": sentiment["short_pct"],
+            "recommendation_mean": _f(info.get("recommendationMean")),
             "rsi": ind["rsi"], "atr": ind["atr"], "ma20": ind["ma20"], "ma150": ind["ma150"],
             "ma150_slope": chart["stage"]["ma150_slope"] if chart["stage"] else None,
             "base_high": ind["base_high"], "base_low": ind["base_low"],

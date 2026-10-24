@@ -18,7 +18,7 @@ from swing_model import (FUND_REASON, HORIZON_MAX_DAYS, MIN_RR, WEIGHTS, analyze
                          guess_currency, looks_like_fund,
                          index_candidates_for, peer_average, region_for, sector_benchmark,
                          sort_key, technical_precheck)
-from ui import (BLUE, GREEN, LABEL, LABEL2, ORANGE, RED, apply_style, badge, esc, footnote,
+from ui import (BLUE, CHART_DOWN, CHART_UP, GREEN, LABEL, LABEL2, LABEL3, ORANGE, RED, SEPARATOR, apply_style, badge, esc, footnote,
                 html_table, large_title, list_rows, score_rows, section, tiles)
 from universes import (EUROPE_EXCHANGES, EXCHANGES, US_UNIVERSES, fetch_universe_full,
                        indices_for_ticker)
@@ -372,7 +372,7 @@ def pct(value):
 
 
 def tone_color(tone):
-    return GREEN if tone >= 0.15 else RED if tone <= -0.15 else "rgba(235,235,245,0.3)"
+    return CHART_UP if tone >= 0.15 else CHART_DOWN if tone <= -0.15 else LABEL3
 
 
 def sentiment_note(r: dict) -> str:
@@ -562,9 +562,9 @@ if view == "Analizza":
 
 
 elif view == "Cerca":
-    with st.container(border=True):
+    with st.container(border=True, key="scan_box"):
         eu, us, approx = market_picker("scan", [], ["S&P 500 (USA)"])
-        extra = st.text_input("Altri ticker (facoltativo)", placeholder="Separati da virgola, es. BC.MI, ASML.AS",
+        extra = st.text_input("Altri ticker (facoltativo)", placeholder="Es. BC.MI, ASML.AS",
                               key="scan_extra")
         n_markets = len(eu) + len(us)
         footnote(f"{n_markets} {'mercato selezionato' if n_markets == 1 else 'mercati selezionati'} · circa {approx} titoli"
@@ -745,10 +745,10 @@ def render_backtest(bt: dict):
     curve = closed.set_index("exit_date")["net_pct"].cumsum()
     fig = go.Figure(go.Scatter(x=curve.index, y=curve.values, mode="lines",
                                line=dict(color=BLUE, width=2.5), fill="tozeroy",
-                               fillcolor="rgba(10,132,255,0.12)"))
+                               fillcolor="rgba(0,122,255,0.10)"))
     fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", height=260,
-                      margin=dict(l=0, r=0, t=6, b=0), font=dict(color="rgba(235,235,245,0.6)"),
-                      xaxis=dict(showgrid=False), yaxis=dict(gridcolor="#2c2c2e", ticksuffix="%", side="right"))
+                      margin=dict(l=0, r=0, t=6, b=0), font=dict(color=LABEL2),
+                      xaxis=dict(showgrid=False), yaxis=dict(gridcolor=SEPARATOR, ticksuffix="%", side="right"))
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
     section("Cosa funziona", "Scegli come scomporre i risultati")
@@ -781,7 +781,7 @@ def render_backtest(bt: dict):
 
 
 if view == "Backtest":
-    with st.container(border=True):
+    with st.container(border=True, key="bt_box"):
         footnote("Il modello rigioca le sue regole sul passato, con i soli dati disponibili in ogni data, e segue "
                  "ogni operazione fino a target, stop o uscita a tempo.")
         bt_eu, bt_us, bt_approx = market_picker("bt", ["Milano"], [])

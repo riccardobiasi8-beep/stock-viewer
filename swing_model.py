@@ -38,7 +38,7 @@ MIN_LIQUIDITY_EUR = 500_000     # controvalore medio giornaliero minimo
 EARNINGS_WARNING_DAYS = 14      # avviso se la trimestrale è entro 14 giorni
 SLOPE_FLAT_PCT = 0.3            # media 150 gg 'piatta' se varia meno dello 0,3% in 20 sedute
 NEAR_HIGH_PCT = 0.95            # 'vicino ai massimi' = entro il 5% dal massimo a 52 settimane
-WEIGHTS = {"fundamentals": 0.30, "trend": 0.30, "chart": 0.40}
+WEIGHTS = {"fundamentals": 0.25, "trend": 0.15, "sector": 0.20, "chart": 0.40}
 VALID_THRESHOLD = 65
 WATCH_THRESHOLD = 50
 
@@ -155,6 +155,138 @@ def history_problem(hist) -> str:
     sessions = int(hist["Close"].dropna().shape[0])
     return (f"Storico troppo corto: {sessions} sedute, ne servono almeno {MIN_HISTORY} "
             "(titolo quotato da poco?)")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SETTORI — classificazione comune ed ETF di riferimento
+# ══════════════════════════════════════════════════════════════════════════════
+SECTOR_IT = {
+    "Technology": "Tecnologia", "Financials": "Finanza", "Health Care": "Salute",
+    "Energy": "Energia", "Industrials": "Industria",
+    "Consumer Discretionary": "Beni di consumo discrezionali",
+    "Consumer Staples": "Beni di prima necessità", "Utilities": "Servizi di pubblica utilità",
+    "Materials": "Materie prime", "Real Estate": "Immobiliare",
+    "Communication Services": "Comunicazioni",
+}
+# Nome del settore come lo usa Yahoo (serve ai multipli di riferimento SECTOR_REF)
+YAHOO_SECTOR_NAME = {
+    "Technology": "Technology", "Financials": "Financial Services", "Health Care": "Healthcare",
+    "Energy": "Energy", "Industrials": "Industrials", "Consumer Discretionary": "Consumer Cyclical",
+    "Consumer Staples": "Consumer Defensive", "Utilities": "Utilities",
+    "Materials": "Basic Materials", "Real Estate": "Real Estate",
+    "Communication Services": "Communication Services",
+}
+# Parole chiave → settore, in ordine (le prime regole hanno la precedenza)
+SECTOR_RULES = [
+    (("utilit", "electric", "water", "power gen"), "Utilities"),
+    (("real estate", "reit", "propert"), "Real Estate"),
+    (("bank", "insur", "financ", "capital market", "asset manag", "brokerage"), "Financials"),
+    (("health", "pharma", "biotech", "medical", "life science"), "Health Care"),
+    (("semiconductor", "software", "information technology", "technology", "tech hardware",
+      "electronic"), "Technology"),
+    (("telecom", "communication", "media", "entertainment", "interactive"), "Communication Services"),
+    (("oil", "gas", "energy", "coal"), "Energy"),
+    (("staples", "consumer defensive", "food", "beverage", "tobacco", "household",
+      "personal care", "grocer", "drug retail"), "Consumer Staples"),
+    (("discretionary", "consumer cyclical", "retail", "automobile", "auto ", "autos",
+      "apparel", "luxury", "travel", "leisure", "hotel", "restaurant", "textile",
+      "consumer products", "personal goods", "footwear"), "Consumer Discretionary"),
+    (("industrial", "aerospace", "defen", "construction", "transport", "machinery",
+      "engineering", "airline", "logistic", "capital goods", "business services",
+      "commercial services"), "Industrials"),
+    (("material", "chemical", "mining", "metal", "steel", "basic resource", "paper",
+      "forest", "basic industr"), "Materials"),
+]
+US_SECTOR_ETF = {
+    "Technology": ("XLK", "ETF tecnologia USA"), "Financials": ("XLF", "ETF finanza USA"),
+    "Health Care": ("XLV", "ETF salute USA"), "Energy": ("XLE", "ETF energia USA"),
+    "Industrials": ("XLI", "ETF industria USA"),
+    "Consumer Discretionary": ("XLY", "ETF consumi discrezionali USA"),
+    "Consumer Staples": ("XLP", "ETF beni di prima necessità USA"),
+    "Utilities": ("XLU", "ETF utility USA"), "Materials": ("XLB", "ETF materie prime USA"),
+    "Real Estate": ("XLRE", "ETF immobiliare USA"),
+    "Communication Services": ("XLC", "ETF comunicazioni USA"),
+}
+# Europa: ETF iShares STOXX Europe 600 (Xetra). Prima i settori fini, poi quelli generali.
+EU_SECTOR_ETF_FINE = [
+    (("utilit",), "EXH9.DE", "ETF utility europee"),
+    (("bank",), "EXV1.DE", "ETF banche europee"),
+    (("insur",), "EXH5.DE", "ETF assicurazioni europee"),
+    (("financial serv", "capital market", "asset manag"), "EXH2.DE", "ETF servizi finanziari europei"),
+    (("automobile", "auto ", "autos"), "EXV5.DE", "ETF auto europee"),
+    (("retail",), "EXH8.DE", "ETF distribuzione europea"),
+    (("travel", "leisure", "hotel", "airline", "restaurant"), "EXV9.DE", "ETF viaggi e tempo libero europei"),
+    (("media",), "EXH6.DE", "ETF media europei"),
+    (("chemical",), "EXV7.DE", "ETF chimica europea"),
+    (("construction",), "EXV8.DE", "ETF costruzioni europee"),
+    (("telecom",), "EXV2.DE", "ETF telecomunicazioni europee"),
+    (("food", "beverage"), "EXH3.DE", "ETF alimentari e bevande europei"),
+    (("oil", "gas"), "EXH1.DE", "ETF petrolio e gas europei"),
+    (("real estate", "propert"), "EXI5.DE", "ETF immobiliare europeo"),
+]
+EU_SECTOR_ETF = {
+    "Technology": ("EXV3.DE", "ETF tecnologia europea"), "Financials": ("EXV1.DE", "ETF banche europee"),
+    "Health Care": ("EXV4.DE", "ETF salute europea"), "Energy": ("EXH1.DE", "ETF petrolio e gas europei"),
+    "Industrials": ("EXH4.DE", "ETF industria europea"),
+    "Consumer Discretionary": ("EXH7.DE", "ETF beni personali e per la casa europei"),
+    "Consumer Staples": ("EXH3.DE", "ETF alimentari e bevande europei"),
+    "Utilities": ("EXH9.DE", "ETF utility europee"), "Materials": ("EXV6.DE", "ETF materie prime europee"),
+    "Real Estate": ("EXI5.DE", "ETF immobiliare europeo"),
+    "Communication Services": ("EXV2.DE", "ETF telecomunicazioni europee"),
+}
+
+
+def canonical_sector(raw):
+    """Riconduce le diverse classificazioni (GICS, ICB, Yahoo) a 11 settori comuni."""
+    if not raw:
+        return None
+    text = " " + str(raw).lower() + " "
+    for keywords, sector in SECTOR_RULES:
+        if any(k in text for k in keywords):
+            return sector
+    return None
+
+
+def region_for(ticker: str):
+    if "." not in ticker:
+        return "us"
+    suffix = "." + ticker.rsplit(".", 1)[1].upper()
+    return "eu" if suffix in EUROPEAN_SUFFIXES else None
+
+
+def sector_benchmark(ticker: str, raw_sector):
+    """Settore comune, regione ed ETF di riferimento per un titolo; None se sconosciuto."""
+    canonical = canonical_sector(raw_sector)
+    region = region_for(ticker)
+    if not canonical or not region:
+        return None
+    if region == "us":
+        etf, label = US_SECTOR_ETF[canonical]
+    else:
+        text = " " + str(raw_sector).lower() + " "
+        etf, label = EU_SECTOR_ETF[canonical]
+        for keywords, fine_etf, fine_label in EU_SECTOR_ETF_FINE:
+            if any(k in text for k in keywords):
+                etf, label = fine_etf, fine_label
+                break
+    return {"canonical": canonical, "region": region, "etf": etf, "etf_label": label,
+            "raw": str(raw_sector)}
+
+
+def peer_average(histories) -> pd.DataFrame:
+    """Andamento medio (pesi uguali) di un gruppo di titoli, come riserva quando manca l'ETF."""
+    series = []
+    for h in histories:
+        if h is None or h.empty:
+            continue
+        close = h["Close"].dropna().astype(float)
+        if len(close) >= MIN_HISTORY:
+            close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
+            series.append(close / close.iloc[0])
+    if not series:
+        return pd.DataFrame()
+    avg = pd.concat(series, axis=1).sort_index().ffill().mean(axis=1).dropna()
+    return pd.DataFrame({"Close": avg})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -347,6 +479,47 @@ def trend_layer(ind: dict, index_hist, index_symbol: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# LIVELLO 2B — TREND DI SETTORE
+# ══════════════════════════════════════════════════════════════════════════════
+def sector_layer(ind: dict, sector) -> dict:
+    """
+    sector = {"canonical", "hist" (DataFrame con Close), "source" (descrizione della fonte)}.
+    Regime del settore (come per l'indice) + forza del titolo rispetto al settore in 3 mesi.
+    """
+    out = {"score": None, "name": None, "source": None, "regime": None,
+           "regime_label": "Settore non disponibile", "relative_strength": None,
+           "exclusions": [], "warnings": []}
+    if not sector or not sector.get("canonical"):
+        out["warnings"].append("Settore non disponibile: trend di settore non valutato")
+        return out
+    out["name"] = SECTOR_IT.get(sector["canonical"], sector["canonical"])
+    out["source"] = sector.get("source")
+    hist = sector.get("hist")
+    if hist is None or hist.empty or hist["Close"].dropna().shape[0] < 221:
+        out["warnings"].append(f"Andamento del settore {out['name']} non disponibile: "
+                               "trend di settore non valutato")
+        return out
+
+    close = hist["Close"].dropna().astype(float)
+    ma200 = close.rolling(200).mean()
+    slope = float(ma200.iloc[-1] / ma200.iloc[-21] - 1)
+    above = float(close.iloc[-1]) > float(ma200.iloc[-1])
+    if above and slope > 0:
+        regime, label, regime_score = "rialzista", "Settore in tendenza rialzista", 100
+    elif not above and slope < 0:
+        regime, label, regime_score = "ribassista", "Settore in tendenza ribassista", 0
+        out["warnings"].append(f"Settore {out['name']} in tendenza ribassista: "
+                               "il titolo si muove controcorrente")
+    else:
+        regime, label, regime_score = "neutro", "Settore senza una tendenza chiara", 50
+    sector_return = float(close.iloc[-1] / close.iloc[-64] - 1) * 100
+    relative = ind["ret_63"] - sector_return
+    out.update(regime=regime, regime_label=label, relative_strength=relative,
+               score=0.6 * regime_score + 0.4 * _clamp(50 + relative * 2.5))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # LIVELLO 3 — GRAFICO (stadi di Weinstein)
 # ══════════════════════════════════════════════════════════════════════════════
 def weinstein_stage(close: pd.Series, ma150: pd.Series, high_52w: float | None = None):
@@ -514,9 +687,13 @@ def earnings_warning(info: dict, today: pd.Timestamp):
 # ANALISI COMPLETA
 # ══════════════════════════════════════════════════════════════════════════════
 def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
-            index_symbol: str | None = None, today: pd.Timestamp | None = None) -> dict:
+            index_symbol: str | None = None, today: pd.Timestamp | None = None,
+            sector: dict | None = None) -> dict:
     today = (today or pd.Timestamp.today()).normalize()
-    info = info or {}
+    info = dict(info or {})
+    # Il settore letto dagli indici permette i multipli di settore anche senza il riepilogo Yahoo
+    if sector and sector.get("canonical") and not info.get("sector"):
+        info["sector"] = YAHOO_SECTOR_NAME.get(sector["canonical"])
     index_symbol = index_symbol or market_index_for(ticker)
 
     result = {
@@ -541,22 +718,29 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
 
     fund = fundamentals_layer(info, ind["price"])
     trend = trend_layer(ind, index_hist, index_symbol)
+    sector_res = sector_layer(ind, sector)
     chart = chart_layer(ind)
     plan = trade_plan(ind, info, today)
 
-    for layer in (fund, trend, chart, plan):
+    for layer in (fund, trend, sector_res, chart, plan):
         result["exclusions"].extend(layer["exclusions"])
         result["warnings"].extend(layer["warnings"])
     earnings = earnings_warning(info, today)
     if earnings:
         result["warnings"].append(earnings)
     if info.get("_source") == "statements":
-        result["warnings"].append(
-            "Fondamentali calcolati dagli ultimi bilanci annuali, perché Yahoo non ha fornito "
-            "il riepilogo: mancano settore, target degli analisti e data della trimestrale, "
-            "e la valutazione è confrontata con i multipli medi di mercato")
+        if info.get("sector"):
+            result["warnings"].append(
+                "Fondamentali calcolati dagli ultimi bilanci annuali, perché Yahoo non ha fornito "
+                "il riepilogo: mancano il target degli analisti e la data della trimestrale")
+        else:
+            result["warnings"].append(
+                "Fondamentali calcolati dagli ultimi bilanci annuali, perché Yahoo non ha fornito "
+                "il riepilogo: mancano settore, target degli analisti e data della trimestrale, "
+                "e la valutazione è confrontata con i multipli medi di mercato")
 
-    scores = {"fundamentals": fund["score"], "trend": trend["score"], "chart": chart["score"]}
+    scores = {"fundamentals": fund["score"], "trend": trend["score"],
+              "sector": sector_res["score"], "chart": chart["score"]}
     weights = {k: w for k, w in WEIGHTS.items() if scores[k] is not None}
     composite = None
     if weights:
@@ -571,18 +755,24 @@ def analyze(ticker: str, info: dict, hist: pd.DataFrame, index_hist,
             "value": round(fund["value_score"], 1) if fund["value_score"] is not None else None,
             "quality": round(fund["quality_score"], 1) if fund["quality_score"] is not None else None,
             "trend": round(trend["score"], 1) if trend["score"] is not None else None,
+            "sector": round(sector_res["score"], 1) if sector_res["score"] is not None else None,
             "chart": round(chart["score"], 1) if chart["score"] is not None else None,
         },
         "labels": {
             "valuation": fund["label"],
             "regime": trend["regime_label"],
             "index": trend["index_name"],
+            "sector": sector_res["name"],
+            "sector_regime": sector_res["regime_label"],
+            "sector_source": sector_res["source"],
             "stage": chart["stage_label"],
         },
         "plan": plan_public,
         "details": {
             **fund["details"],
             "relative_strength": trend["relative_strength"],
+            "sector_relative_strength": sector_res["relative_strength"],
+            "sector_raw": (sector or {}).get("raw"),
             "rsi": ind["rsi"], "atr": ind["atr"], "ma20": ind["ma20"], "ma150": ind["ma150"],
             "ma150_slope": chart["stage"]["ma150_slope"] if chart["stage"] else None,
             "base_high": ind["base_high"], "base_low": ind["base_low"],

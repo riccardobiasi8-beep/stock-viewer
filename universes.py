@@ -37,7 +37,14 @@ UNIVERSES = {
     "ATX (Austria)":                 {"region": "eu", "as_of": "aprile 2026", "tickers": [
         "EBS.VI", "VER.VI", "OMV.VI", "BG.VI", "ANDR.VI", "WIE.VI", "VOE.VI", "RBI.VI", "POS.VI",
         "CAI.VI", "EVN.VI", "ATS.VI", "POST.VI", "VIG.VI", "LNZ.VI", "UQA.VI", "SBO.VI", "IIA.VI",
-        "STR.VI", "DOC.VI"]},
+        "STR.VI", "DOC.VI"],
+        "sectors": {
+            "EBS.VI": "Banks", "VER.VI": "Electric Utilities", "OMV.VI": "Oil & Gas", "BG.VI": "Banks",
+            "ANDR.VI": "Industrial Machinery", "WIE.VI": "Construction Materials", "VOE.VI": "Steel",
+            "RBI.VI": "Banks", "POS.VI": "Construction", "CAI.VI": "Real Estate", "EVN.VI": "Electric Utilities",
+            "ATS.VI": "Electronic Components", "POST.VI": "Transportation", "VIG.VI": "Insurance",
+            "LNZ.VI": "Chemicals", "UQA.VI": "Insurance", "SBO.VI": "Oil & Gas Equipment",
+            "IIA.VI": "Real Estate", "STR.VI": "Construction", "DOC.VI": "Travel & Leisure"}},
     "ISEQ 20 (Irlanda)":             {"url": _wiki("ISEQ_20"),                     "suffix": ".IR", "min": 15,  "region": "eu"},
     "OMX Stockholm 30 (Svezia)":     {"url": _wiki("OMX_Stockholm_30"),            "suffix": ".ST", "min": 25,  "region": "eu"},
     "OMX Copenhagen 25 (Danimarca)": {"url": _wiki("OMX_Copenhagen_25"),           "suffix": ".CO", "min": 20,  "region": "eu"},
@@ -47,7 +54,15 @@ UNIVERSES = {
     "Varsavia, principali titoli (Polonia)": {"region": "eu", "as_of": "elenco curato", "tickers": [
         "PKO.WA", "PKN.WA", "PEO.WA", "PZU.WA", "KGH.WA", "LPP.WA", "ALE.WA", "CDR.WA", "DNP.WA",
         "MBK.WA", "SPL.WA", "ALR.WA", "BDX.WA", "KRU.WA", "PGE.WA", "OPL.WA", "KTY.WA", "PCO.WA",
-        "CCC.WA", "ZAB.WA", "JSW.WA"]},
+        "CCC.WA", "ZAB.WA", "JSW.WA"],
+        "sectors": {
+            "PKO.WA": "Banks", "PKN.WA": "Oil & Gas", "PEO.WA": "Banks", "PZU.WA": "Insurance",
+            "KGH.WA": "Mining", "LPP.WA": "Apparel Retail", "ALE.WA": "Internet Retail",
+            "CDR.WA": "Interactive Entertainment", "DNP.WA": "Food Retail", "MBK.WA": "Banks",
+            "SPL.WA": "Banks", "ALR.WA": "Banks", "BDX.WA": "Construction", "KRU.WA": "Financial Services",
+            "PGE.WA": "Electric Utilities", "OPL.WA": "Telecommunications", "KTY.WA": "Metals",
+            "PCO.WA": "Discount Retail", "CCC.WA": "Footwear Retail", "ZAB.WA": "Food Retail",
+            "JSW.WA": "Coal Mining"}},
 }
 
 # Per ogni borsa, gli indici che ne coprono i titoli principali
@@ -111,6 +126,30 @@ def _clean_column(series, suffix):
     return [s for s in dict.fromkeys(symbols) if s]
 
 
+def _sector_column(labels: dict):
+    """Colonna del settore nella stessa tabella dei ticker (settore prima di industria)."""
+    lowered = {l.lower(): l for l in labels}
+    for word in ("sector", "industry"):
+        for low, original in lowered.items():
+            if word in low and "sub" not in low:
+                return original
+    return None
+
+
+def _extract(table, ticker_col, suffix, sector_col=None):
+    symbols, sectors = [], {}
+    for _, row in table.iterrows():
+        symbol = clean_symbol(row[ticker_col], suffix)
+        if not symbol or symbol in sectors or symbol in symbols:
+            continue
+        symbols.append(symbol)
+        if sector_col is not None:
+            raw = str(row[sector_col]).strip()
+            if raw and raw.lower() != "nan":
+                sectors[symbol] = re.sub(r"\[.*?\]", "", raw).strip()
+    return symbols, sectors
+
+
 def _read_tables(html: str):
     """Legge le tabelle una per una: una tabella malformata non blocca le altre."""
     try:
@@ -128,8 +167,8 @@ def _read_tables(html: str):
     return tables
 
 
-def parse_constituents(html: str, suffix: str, min_size: int = 10, columns=None):
-    """Cerca la tabella dei componenti e ne estrae i ticker."""
+def parse_constituents_full(html: str, suffix: str, min_size: int = 10, columns=None):
+    """Cerca la tabella dei componenti: restituisce (ticker, {ticker: settore})."""
     tables = [t for t in _read_tables(html) if len(t) >= min_size]
     names = columns or TICKER_COLUMNS
     # 1) colonne con un nome da ticker
@@ -141,29 +180,56 @@ def parse_constituents(html: str, suffix: str, min_size: int = 10, columns=None)
         candidates = [n for n in names if n in labels]
         candidates += [l for l in labels if l not in candidates and "isin" not in l.lower()
                        and any(w in l.lower() for w in TICKER_WORDS)]
+        sector_label = _sector_column(labels)
         for name in candidates:
-            symbols = _clean_column(table[labels[name]], suffix)
+            symbols, sectors = _extract(table, labels[name], suffix,
+                                        labels[sector_label] if sector_label else None)
             if len(symbols) >= min_size:
-                return symbols
+                return symbols, sectors
     # 2) riconoscimento automatico: colonna di valori brevi in maiuscolo
     isin = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
     for table in tables:
+        labels = {str(c[-1] if isinstance(c, tuple) else c).strip(): c for c in table.columns}
+        sector_label = _sector_column(labels)
         for col in table.columns:
             label = str(col[-1] if isinstance(col, tuple) else col).lower()
             raw = [str(v).strip() for v in table[col].dropna().tolist()]
             if not raw or "isin" in label or sum(bool(isin.match(v)) for v in raw) > len(raw) / 2:
                 continue
             uppercase = sum(v == v.upper() and re.search(r"[A-Z]", v) is not None for v in raw)
-            symbols = _clean_column(table[col], suffix)
+            symbols, sectors = _extract(table, col, suffix,
+                                        labels[sector_label] if sector_label else None)
             if uppercase >= 0.8 * len(raw) and len(symbols) >= max(min_size, 0.8 * len(raw)):
-                return symbols
-    return []
+                return symbols, sectors
+    return [], {}
+
+
+def parse_constituents(html: str, suffix: str, min_size: int = 10, columns=None):
+    return parse_constituents_full(html, suffix, min_size, columns)[0]
+
+
+def fetch_universe_full(name: str):
+    """(ticker, {ticker: settore}) di un indice."""
+    cfg = UNIVERSES[name]
+    if "tickers" in cfg:
+        return list(cfg["tickers"]), dict(cfg.get("sectors", {}))
+    response = requests.get(cfg["url"], headers=HEADERS, timeout=20)
+    response.raise_for_status()
+    return parse_constituents_full(response.text, cfg["suffix"], cfg["min"])
+
+
+def indices_for_ticker(ticker: str):
+    """Indici in cui cercare un titolo, in base al suffisso di borsa."""
+    suffix = "" if "." not in ticker else "." + ticker.rsplit(".", 1)[1].upper()
+    found = []
+    for name, cfg in UNIVERSES.items():
+        index_suffix = cfg.get("suffix")
+        if index_suffix is None and cfg.get("tickers"):
+            index_suffix = "." + cfg["tickers"][0].rsplit(".", 1)[1]
+        if index_suffix == suffix:
+            found.append(name)
+    return found
 
 
 def fetch_universe(name: str):
-    cfg = UNIVERSES[name]
-    if "tickers" in cfg:
-        return list(cfg["tickers"])
-    response = requests.get(cfg["url"], headers=HEADERS, timeout=20)
-    response.raise_for_status()
-    return parse_constituents(response.text, cfg["suffix"], cfg["min"])
+    return fetch_universe_full(name)[0]

@@ -233,9 +233,9 @@ def run_backtest(histories: dict, market_of: dict, sector_of: dict, market_state
     """
     last_dates = [_naive_index(h.index)[-1] for h in histories.values() if h is not None and not h.empty]
     if not last_dates:
-        return pd.DataFrame(), {"segnali": 0, "non_eseguiti": 0, "titoli": 0}
+        return pd.DataFrame(), {"segnali": 0, "non_eseguiti": 0, "titoli": 0, "saltati": 0}
     dates = snapshot_dates(max(last_dates), years, step_days)
-    trades, counts = [], {"segnali": 0, "non_eseguiti": 0, "titoli": 0}
+    trades, counts = [], {"segnali": 0, "non_eseguiti": 0, "titoli": 0, "saltati": 0}
 
     tickers = list(histories)
     for k, ticker in enumerate(tickers, start=1):
@@ -252,13 +252,18 @@ def run_backtest(histories: dict, market_of: dict, sector_of: dict, market_state
             i = frame.index.searchsorted(date, side="right") - 1
             if i < MIN_HISTORY - 1 or i <= busy_until or i >= len(frame) - 1:
                 continue
-            signal = evaluate(ticker, frame, i, frame.index[i],
-                              _state_at(market_states_t, frame.index[i]),
-                              _state_at(sector_states_t, frame.index[i]))
-            if not signal or signal["exclusions"] or signal["composite"] < min_score:
+            try:
+                signal = evaluate(ticker, frame, i, frame.index[i],
+                                  _state_at(market_states_t, frame.index[i]),
+                                  _state_at(sector_states_t, frame.index[i]))
+                if not signal or signal["exclusions"] or signal["composite"] < min_score:
+                    continue
+                result = simulate(frame, i, signal["plan"])
+            except Exception as e:          # un dato anomalo non deve fermare tutta la simulazione
+                counts["saltati"] += 1
+                print(f"[Backtest] {ticker} {frame.index[i].date()}: {type(e).__name__}: {str(e)[:80]}")
                 continue
             counts["segnali"] += 1
-            result = simulate(frame, i, signal["plan"])
             if not result["filled"]:
                 counts["non_eseguiti"] += 1
                 continue

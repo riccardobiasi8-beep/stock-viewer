@@ -256,3 +256,89 @@ def enrich_info(ticker_obj, ticker_sym: str, info: dict, fmp_key: str = "") -> d
         print(f"[Enricher] Filled {len(missing_before)-len(missing_after)} fields. Still missing: {missing_after}")
 
     return enriched
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FONDAMENTALI SOLO DAI BILANCI — quando Yahoo rifiuta il riepilogo (errore 401)
+# ══════════════════════════════════════════════════════════════════════════════
+def _row(df, *names):
+    """Valore più recente della prima riga trovata tra i nomi indicati."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    for name in names:
+        if name in df.index:
+            for value in df.loc[name].tolist():
+                v = _safe_float(value)
+                if v is not None:
+                    return v
+    return None
+
+
+def fundamentals_from_statements(ticker_obj, price: float, currency: str) -> dict:
+    """
+    Ricostruisce i fondamentali dagli ultimi bilanci annuali e dal prezzo.
+    Prezzo e valuta arrivano dallo storico già scaricato: nessuna chiamata al riepilogo.
+    Restituisce {} se i bilanci non sono disponibili.
+    """
+    inc = ticker_obj.income_stmt
+    bal = ticker_obj.balance_sheet
+    cf = ticker_obj.cashflow
+    if (inc is None or inc.empty) and (bal is None or bal.empty):
+        return {}
+
+    net_income = _row(inc, "Net Income", "Net Income Common Stockholders")
+    revenue = _row(inc, "Total Revenue", "Operating Revenue")
+    ebitda = _row(inc, "EBITDA", "Normalized EBITDA")
+    gross = _row(inc, "Gross Profit")
+    operating = _row(inc, "Operating Income", "Total Operating Income As Reported")
+    equity = _row(bal, "Stockholders Equity", "Common Stock Equity")
+    assets = _row(bal, "Total Assets")
+    debt = _row(bal, "Total Debt")
+    cash = _row(bal, "Cash And Cash Equivalents",
+                "Cash Cash Equivalents And Short Term Investments")
+    shares = _row(bal, "Ordinary Shares Number", "Share Issued")
+    fcf = _row(cf, "Free Cash Flow")
+
+    # Le azioni di Londra sono quotate in pence: la capitalizzazione va in sterline
+    price_major = price / 100 if currency == "GBp" else price
+    market_cap = shares * price_major if shares and price_major else None
+
+    out = {"currentPrice": price, "currency": currency, "_source": "statements"}
+    if market_cap:
+        out["marketCap"] = market_cap
+    if market_cap and net_income and net_income > 0:
+        pe = market_cap / net_income
+        if 1 <= pe <= 300:
+            out["trailingPE"] = round(pe, 1)
+    if market_cap and ebitda and ebitda > 0:
+        ev_ebitda = (market_cap + (debt or 0) - (cash or 0)) / ebitda
+        if 0 < ev_ebitda <= 100:
+            out["enterpriseToEbitda"] = round(ev_ebitda, 1)
+    if market_cap and equity and equity > 0:
+        out["priceToBook"] = round(market_cap / equity, 2)
+    if net_income is not None and revenue:
+        out["profitMargins"] = round(net_income / revenue, 4)
+    if gross is not None and revenue:
+        out["grossMargins"] = round(gross / revenue, 4)
+    if operating is not None and revenue:
+        out["operatingMargins"] = round(operating / revenue, 4)
+    if net_income is not None and equity and assets:
+        if equity > 0 and equity / assets >= 0.10:
+            out["returnOnEquity"] = round(net_income / equity, 4)
+        else:                                   # patrimonio quasi nullo (riacquisti): ROA
+            out["returnOnEquity"] = round(net_income / assets, 4)
+            out["_roe_is_roa"] = True
+    if net_income is not None and assets:
+        out["returnOnAssets"] = round(net_income / assets, 4)
+    if debt is not None and equity and equity > 0:
+        out["debtToEquity"] = round(debt / equity * 100, 2)
+    if fcf is not None:
+        out["freeCashflow"] = fcf
+    try:
+        revenues = [_safe_float(v) for v in inc.loc["Total Revenue"].tolist()]
+        revenues = [v for v in revenues if v]
+        if len(revenues) >= 2:
+            out["revenueGrowth"] = round((revenues[0] - revenues[1]) / abs(revenues[1]), 4)
+    except Exception:
+        pass
+    return out

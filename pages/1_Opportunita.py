@@ -9,7 +9,8 @@ import streamlit as st
 import yfinance as yf
 
 from data_sources import enrich_info, fundamentals_from_statements
-from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, canonical_sector, guess_currency,
+from swing_model import (FUND_REASON, HORIZON_MAX_DAYS, MIN_RR, analyze, canonical_sector,
+                         guess_currency, looks_like_fund,
                          index_candidates_for, peer_average, region_for, sector_benchmark,
                          sort_key, technical_precheck)
 from universes import (EUROPE_EXCHANGES, EXCHANGES, US_UNIVERSES, fetch_universe_full,
@@ -179,11 +180,41 @@ def get_sector_history(symbol: str) -> pd.DataFrame:
     return hist
 
 
+_YAHOO_SECTOR = {}        # ticker -> settore/industria dalla ricerca Yahoo (o None)
+
+
+def yahoo_sector(ticker: str):
+    """
+    Settore e industria dalla ricerca di Yahoo, che funziona anche quando il riepilogo è bloccato.
+    I fondi e gli ETF vengono segnalati come 'Closed End Investments'.
+    """
+    if ticker in _YAHOO_SECTOR:
+        return _YAHOO_SECTOR[ticker]
+    raw = None
+    try:
+        quotes = getattr(yf.Search(ticker, max_results=5), "quotes", []) or []
+        for q in quotes:
+            if str(q.get("symbol", "")).upper() != ticker.upper():
+                continue
+            if q.get("quoteType") in ("ETF", "MUTUALFUND", "CLOSEDENDFUND"):
+                raw = "Closed End Investments"
+            else:
+                parts = [q.get("industry") or q.get("industryDisp"), q.get("sector") or q.get("sectorDisp")]
+                raw = " · ".join(p for p in parts if p) or None
+            break
+    except Exception as e:
+        print(f"[Opportunità] settore {ticker}: {str(e)[:80]}")
+    _YAHOO_SECTOR[ticker] = raw
+    return raw
+
+
 def sector_context(ticker: str, raw_sector, peers=None):
     """Settore del titolo con l'andamento di riferimento: ETF, oppure media dei concorrenti."""
+    if not raw_sector:
+        return None
     canonical = canonical_sector(raw_sector)
     if not canonical:
-        return None
+        return {"canonical": None, "raw": str(raw_sector), "hist": None, "source": None}
     sector = {"canonical": canonical, "raw": str(raw_sector), "hist": None, "source": None}
     bench = sector_benchmark(ticker, raw_sector)
     if bench:
@@ -204,7 +235,10 @@ def analyze_with_history(ticker: str, hist, index_hist, index_symbol: str, fmp_k
         info = fetch_info(ticker, fmp_key, hist)
         if info is None:
             return error_result(ticker, DOWNLOAD_FAILED)
-        sector = sector_context(ticker, raw_sector or info.get("sector"), peers)
+        raw = raw_sector or info.get("sector") or yahoo_sector(ticker)
+        if not canonical_sector(raw) and not looks_like_fund(raw):
+            raw = yahoo_sector(ticker) or raw          # settore di Wikipedia non riconosciuto
+        sector = sector_context(ticker, raw, peers)
         return analyze(ticker, info, hist, index_hist, index_symbol, sector=sector)
     except Exception as e:
         return error_result(ticker, f"Dati non recuperabili: {e}")
@@ -509,6 +543,9 @@ with tab_scan:
 
             results, survivors = [], []
             for t in tickers:
+                if looks_like_fund(raw_sectors.get(t)):
+                    results.append(error_result(t, FUND_REASON))
+                    continue
                 idx_symbol, idx_hist = index_map[tuple(index_candidates_for(t))]
                 reasons = technical_precheck(t, hists.get(t), idx_hist, idx_symbol)
                 if reasons:

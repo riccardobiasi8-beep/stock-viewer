@@ -12,60 +12,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-* { font-family: 'Inter', sans-serif; box-sizing: border-box; }
-html, body, [data-testid="stAppViewContainer"] { background: #000; color: #f5f5f7; }
-[data-testid="stHeader"] { display: none; }
-[data-testid="stSidebar"] { display: none; }
-.block-container { padding: 16px 16px 60px !important; max-width: 900px; margin: auto; }
-.stTextInput input {
-    background: #1c1c1e !important; border: 1px solid #3a3a3c !important;
-    border-radius: 12px !important; color: #f5f5f7 !important;
-    font-size: 1rem !important; padding: 12px 16px !important;
-}
-.stTextInput input:focus { border-color: #0a84ff !important; outline: none !important; }
-.metric-card {
-    background: #1c1c1e; border-radius: 12px;
-    padding: 14px 16px; margin-bottom: 8px;
-}
-.metric-label { font-size: 0.65rem; color: #8e8e93; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
-.metric-value { font-size: 1.1rem; font-weight: 600; color: #f5f5f7; }
-.metric-value.green { color: #30d158; }
-.metric-value.red { color: #ff453a; }
-.metric-value.blue { color: #0a84ff; }
-.metric-value.orange { color: #ff9f0a; }
-.section-header { font-size: 0.75rem; font-weight: 700; color: #8e8e93;
-    text-transform: uppercase; letter-spacing: 0.1em;
-    margin: 24px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #2c2c2e; }
-.price-main { font-size: 2.6rem; font-weight: 700; line-height: 1; }
-.company-name { font-size: 1rem; color: #8e8e93; margin-bottom: 4px; }
-.ticker-badge { display: inline-block; background: #2c2c2e;
-    border-radius: 6px; padding: 2px 8px; font-size: 0.75rem;
-    font-weight: 600; color: #8e8e93; margin-right: 6px; }
-.search-result {
-    background: #1c1c1e; border: 1px solid #2c2c2e;
-    border-radius: 10px; padding: 10px 14px; margin-bottom: 6px;
-    cursor: pointer; transition: border-color 0.15s;
-}
-.search-result:hover { border-color: #0a84ff; }
-.search-result-name { font-size: 0.9rem; font-weight: 600; color: #f5f5f7; }
-.search-result-ticker { font-size: 0.75rem; color: #8e8e93; margin-top: 2px; }
-.stButton button { background: #2c2c2e !important; color: #f5f5f7 !important;
-    border: none !important; border-radius: 8px !important;
-    font-size: 0.8rem !important; padding: 6px 12px !important; font-weight: 500 !important; }
-.stButton button:hover { background: #3a3a3c !important; }
-[data-testid="stTabs"] button { color: #8e8e93 !important; font-size: 0.85rem !important; font-weight: 500 !important; }
-[data-testid="stTabs"] button[aria-selected="true"] { color: #f5f5f7 !important; border-bottom: 2px solid #0a84ff !important; }
-footer { display: none !important; }
-#MainMenu { display: none !important; }
-.stDeployButton { display: none !important; }
-[data-testid="stDataFrame"] { background: #1c1c1e !important; }
-</style>
-""", unsafe_allow_html=True)
+# ── Stile condiviso in stile Apple (ui.py) ─────────────────────────────────────
+from ui import apply_style
+apply_style()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -186,9 +135,12 @@ def search_tickers(query: str) -> list:
 
 # ── App ───────────────────────────────────────────────────────────────────────
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-st.markdown("## 📈 Stock Viewer")
+st.markdown("<div class='ios-large-title'>Stock Viewer</div>"
+            "<div class='ios-subtitle'>Prezzi, fondamentali e grafici di qualsiasi azione.</div>",
+            unsafe_allow_html=True)
 try:
-    st.page_link("pages/1_Opportunita.py", label="Cerca opportunità di trading", icon="🎯")
+    st.page_link("pages/1_Opportunita.py", label="Cerca opportunità di trading",
+                 icon=":material/target:")
 except Exception:
     pass  # la pagina non è ancora presente nel repo: l'app principale funziona comunque
 
@@ -246,7 +198,10 @@ if ticker:
 
 # ── Load & display ────────────────────────────────────────────────────────────
 if ticker:
-    fmp_key = st.secrets.get("FMP_API_KEY", "") if hasattr(st, 'secrets') else ""
+    try:
+        fmp_key = st.secrets.get("FMP_API_KEY", "")
+    except Exception:       # nessun file di Secrets configurato
+        fmp_key = ""
     info = fetch_info(ticker, fmp_key)
     hist = fetch_hist(ticker, st.session_state.period)
 

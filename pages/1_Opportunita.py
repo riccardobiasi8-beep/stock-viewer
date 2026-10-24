@@ -9,9 +9,11 @@ import streamlit as st
 import yfinance as yf
 
 from data_sources import enrich_info, fundamentals_from_statements
-from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, guess_currency,
-                         index_candidates_for, sort_key, technical_precheck)
-from universes import EUROPE_EXCHANGES, EXCHANGES, US_UNIVERSES, fetch_universe
+from swing_model import (HORIZON_MAX_DAYS, MIN_RR, analyze, canonical_sector, guess_currency,
+                         index_candidates_for, peer_average, region_for, sector_benchmark,
+                         sort_key, technical_precheck)
+from universes import (EUROPE_EXCHANGES, EXCHANGES, US_UNIVERSES, fetch_universe_full,
+                       indices_for_ticker)
 
 st.set_page_config(page_title="Opportunità", page_icon="🎯", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -165,12 +167,45 @@ def error_result(ticker: str, reason: str) -> dict:
             "exclusions": [reason], "currency": "", "price": None}
 
 
-def analyze_with_history(ticker: str, hist, index_hist, index_symbol: str, fmp_key: str) -> dict:
+_SECTOR_HISTORY = {}      # simbolo ETF -> (istante, storico): condiviso tra i thread della scansione
+
+
+def get_sector_history(symbol: str) -> pd.DataFrame:
+    cached = _SECTOR_HISTORY.get(symbol)
+    if cached and time.time() - cached[0] < 1800:
+        return cached[1]
+    hist = fetch_history(symbol)
+    _SECTOR_HISTORY[symbol] = (time.time(), hist)
+    return hist
+
+
+def sector_context(ticker: str, raw_sector, peers=None):
+    """Settore del titolo con l'andamento di riferimento: ETF, oppure media dei concorrenti."""
+    canonical = canonical_sector(raw_sector)
+    if not canonical:
+        return None
+    sector = {"canonical": canonical, "raw": str(raw_sector), "hist": None, "source": None}
+    bench = sector_benchmark(ticker, raw_sector)
+    if bench:
+        hist = get_sector_history(bench["etf"])
+        if not hist.empty and hist["Close"].dropna().shape[0] >= 221:
+            sector.update(hist=hist, source=f"{bench['etf_label']} ({bench['etf']})")
+            return sector
+    group = (region_for(ticker), canonical)
+    if peers and group in peers:
+        hist, count = peers[group]
+        sector.update(hist=hist, source=f"media di {count} titoli dello stesso settore")
+    return sector
+
+
+def analyze_with_history(ticker: str, hist, index_hist, index_symbol: str, fmp_key: str,
+                         raw_sector=None, peers=None) -> dict:
     try:
         info = fetch_info(ticker, fmp_key, hist)
         if info is None:
             return error_result(ticker, DOWNLOAD_FAILED)
-        return analyze(ticker, info, hist, index_hist, index_symbol)
+        sector = sector_context(ticker, raw_sector or info.get("sector"), peers)
+        return analyze(ticker, info, hist, index_hist, index_symbol, sector=sector)
     except Exception as e:
         return error_result(ticker, f"Dati non recuperabili: {e}")
 
@@ -191,42 +226,54 @@ def cached_analysis(ticker: str, fmp_key: str) -> dict:
     if hist.empty:
         return error_result(ticker, "Ticker non trovato o senza quotazioni su Yahoo Finance")
     symbol, index_hist = cached_resolved_index(tuple(index_candidates_for(ticker)))
-    return analyze_with_history(ticker, hist, index_hist, symbol, fmp_key)
+    return analyze_with_history(ticker, hist, index_hist, symbol, fmp_key,
+                                raw_sector=lookup_sector(ticker))
+
+
+def lookup_sector(ticker: str):
+    """Settore del titolo dalle tabelle degli indici della sua borsa (se presente)."""
+    for name in indices_for_ticker(ticker):
+        _, _, _, sectors = load_universe(name)
+        if ticker in sectors:
+            return sectors[ticker]
+    return None
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _universe_ok(name: str):
-    symbols = fetch_universe(name)
+    symbols, sectors = fetch_universe_full(name)
     if not symbols:
         raise RuntimeError("tabella dei titoli non trovata")
-    return symbols
+    return symbols, sectors
 
 
 def load_universe(name: str):
-    """Gli errori non vengono memorizzati: al tentativo successivo si riprova davvero."""
+    """(ticker, fonte, errore, settori). Gli errori non vengono memorizzati: si riprova davvero."""
     try:
-        return _universe_ok(name), "Wikipedia", None
+        symbols, sectors = _universe_ok(name)
+        return symbols, "Wikipedia", None, sectors
     except Exception as e:
-        return [], None, f"{type(e).__name__}: {str(e)[:150]}"
+        return [], None, f"{type(e).__name__}: {str(e)[:150]}", {}
 
 
 def load_exchange(name: str):
     """Unisce gli indici di una borsa; segnala quelli che non si sono potuti leggere."""
-    symbols, loaded, errors = [], [], []
+    symbols, sectors, loaded, errors = [], {}, [], []
     for index_name in EXCHANGES[name]:
         short = index_name.split(" (")[0]
-        index_symbols, _, error = load_universe(index_name)
+        index_symbols, _, error, index_sectors = load_universe(index_name)
         if index_symbols:
             symbols += index_symbols
+            sectors.update(index_sectors)
             loaded.append(short)
         else:
             errors.append((short, error))
     if not symbols:
-        return [], None, " | ".join(f"{n}: {e}" for n, e in errors)
+        return [], None, " | ".join(f"{n}: {e}" for n, e in errors), {}
     label = " + ".join(loaded)
     if errors:
         label += "; non letto: " + ", ".join(n for n, _ in errors)
-    return list(dict.fromkeys(symbols)), label, None
+    return list(dict.fromkeys(symbols)), label, None, sectors
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -330,9 +377,13 @@ def render_result(r: dict):
     if s:
         st.markdown("<div class='sec'>Punteggi</div>", unsafe_allow_html=True)
         st.markdown(
-            score_bar("Fondamentali (peso 30%)", s.get("fundamentals"), lab.get("valuation", ""))
-            + score_bar("Trend di mercato (peso 30%)", s.get("trend"),
+            score_bar("Fondamentali (peso 25%)", s.get("fundamentals"), lab.get("valuation", ""))
+            + score_bar("Trend di mercato (peso 15%)", s.get("trend"),
                         f"{lab.get('index', '')}: {lab.get('regime', '')}")
+            + score_bar("Trend di settore (peso 20%)", s.get("sector"),
+                        (f"{lab.get('sector')}: {lab.get('sector_regime', '')}"
+                         + (f" · {lab.get('sector_source')}" if lab.get("sector_source") else ""))
+                        if lab.get("sector") else "Settore non disponibile")
             + score_bar("Grafico (peso 40%)", s.get("chart"), lab.get("stage", "")),
             unsafe_allow_html=True)
 
@@ -355,6 +406,9 @@ def render_result(r: dict):
                  f"{d.get('n_analysts', 0)} analisti"),
                 ("Forza relativa 3 mesi", num(d.get("relative_strength"), 1, " punti %"),
                  "rendimento del titolo meno quello dell'indice"),
+                ("Settore (fonte indice)", d.get("sector_raw") or "n.d.", ""),
+                ("Forza relativa vs settore 3 mesi", num(d.get("sector_relative_strength"), 1, " punti %"),
+                 "rendimento del titolo meno quello del settore"),
                 ("RSI 14", num(d.get("rsi"), 0), ""),
                 ("ATR 14", num(d.get("atr"), 2), "oscillazione media giornaliera"),
                 ("Media 20 giorni", num(d.get("ma20"), 2), ""),
@@ -421,13 +475,14 @@ with tab_scan:
         st.caption("Tutta l'Europa sono circa 800 titoli: la scansione richiede alcuni minuti.")
 
     if st.button("Scansiona"):
-        tickers, failed, sources = [], {}, {}
+        tickers, failed, sources, raw_sectors = [], {}, {}, {}
         status = st.empty()
         jobs = [(n, lambda n=n: load_exchange(n)) for n in (EUROPE_EXCHANGES if all_europe else exchanges)]
         jobs += [(n, lambda n=n: load_universe(n)) for n in chosen]
         for name, load in jobs:
             status.caption(f"Leggo l'elenco di {name}…")
-            symbols, source, error = load()
+            symbols, source, error, sectors = load()
+            raw_sectors.update(sectors)
             if symbols:
                 sources[name] = f"{len(symbols)}" + (f" ({source})" if source != "Wikipedia" else "")
                 tickers += symbols
@@ -462,13 +517,34 @@ with tab_scan:
                     survivors.append(t)
 
             if survivors:
+                # Trend di settore: ETF di riferimento scaricati in blocco...
+                etfs = sorted({b["etf"] for t in survivors
+                               if (b := sector_benchmark(t, raw_sectors.get(t)))})
+                if etfs:
+                    progress.progress(0.5, text=f"Scarico l'andamento di {len(etfs)} settori…")
+                    for symbol, etf_hist in bulk_history(etfs).items():
+                        _SECTOR_HISTORY[symbol] = (time.time(), etf_hist)
+                # ...e, come riserva, la media dei titoli dello stesso settore (almeno 5)
+                groups_hist = {}
+                for t, h in hists.items():
+                    canonical = canonical_sector(raw_sectors.get(t))
+                    if canonical and region_for(t) and h is not None and not h.empty:
+                        groups_hist.setdefault((region_for(t), canonical), []).append(h)
+                peers = {}
+                for group, members in groups_hist.items():
+                    if len(members) >= 5:
+                        avg = peer_average(members)
+                        if not avg.empty:
+                            peers[group] = (avg, len(members))
+
                 progress.progress(0.5, text=f"Passaggio 2 di 2: analizzo i fondamentali di {len(survivors)} titoli…")
                 with cf.ThreadPoolExecutor(max_workers=3) as pool:
                     futures = []
                     for t in survivors:
                         idx_symbol, idx_hist = index_map[tuple(index_candidates_for(t))]
                         futures.append(pool.submit(analyze_with_history, t, hists[t],
-                                                   idx_hist, idx_symbol, fmp_key))
+                                                   idx_hist, idx_symbol, fmp_key,
+                                                   raw_sectors.get(t), peers))
                     for i, fut in enumerate(cf.as_completed(futures), start=1):
                         results.append(fut.result())
                         progress.progress(0.5 + 0.5 * i / len(survivors),

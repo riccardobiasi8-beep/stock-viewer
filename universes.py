@@ -20,7 +20,6 @@ def _wiki(page: str) -> str:
 # credibile come elenco dei componenti (evita di leggere la tabella sbagliata)
 UNIVERSES = {
     "S&P 500 (USA)":                 {"url": _wiki("List_of_S%26P_500_companies"), "suffix": "",    "min": 400, "region": "us"},
-    "Nasdaq 100 (USA)":              {"url": _wiki("Nasdaq-100"),                  "suffix": "",    "min": 80,  "region": "us"},
     "FTSE MIB (Italia)":             {"url": _wiki("FTSE_MIB"),                    "suffix": ".MI", "min": 30,  "region": "eu"},
     "DAX (Germania)":                {"url": _wiki("DAX"),                         "suffix": ".DE", "min": 30,  "region": "eu"},
     "MDAX (Germania)":               {"url": _wiki("MDAX"),                        "suffix": ".DE", "min": 30,  "region": "eu"},

@@ -34,13 +34,21 @@ UNIVERSES = {
     "SMI (Svizzera)":                {"url": _wiki("Swiss_Market_Index"),          "suffix": ".SW", "min": 15,  "region": "eu"},
     "BEL 20 (Belgio)":               {"url": _wiki("BEL_20"),                      "suffix": ".BR", "min": 15,  "region": "eu"},
     "PSI (Portogallo)":              {"url": _wiki("PSI-20"),                      "suffix": ".LS", "min": 10,  "region": "eu"},
-    "ATX (Austria)":                 {"url": _wiki("Austrian_Traded_Index"),       "suffix": ".VI", "min": 15,  "region": "eu"},
+    # Wikipedia elenca solo i nomi delle società: ticker trascritti dalla composizione di aprile 2026
+    "ATX (Austria)":                 {"region": "eu", "as_of": "aprile 2026", "tickers": [
+        "EBS.VI", "VER.VI", "OMV.VI", "BG.VI", "ANDR.VI", "WIE.VI", "VOE.VI", "RBI.VI", "POS.VI",
+        "CAI.VI", "EVN.VI", "ATS.VI", "POST.VI", "VIG.VI", "LNZ.VI", "UQA.VI", "SBO.VI", "IIA.VI",
+        "STR.VI", "DOC.VI"]},
     "ISEQ 20 (Irlanda)":             {"url": _wiki("ISEQ_20"),                     "suffix": ".IR", "min": 15,  "region": "eu"},
     "OMX Stockholm 30 (Svezia)":     {"url": _wiki("OMX_Stockholm_30"),            "suffix": ".ST", "min": 25,  "region": "eu"},
     "OMX Copenhagen 25 (Danimarca)": {"url": _wiki("OMX_Copenhagen_25"),           "suffix": ".CO", "min": 20,  "region": "eu"},
     "OMX Helsinki 25 (Finlandia)":   {"url": _wiki("OMX_Helsinki_25"),             "suffix": ".HE", "min": 20,  "region": "eu"},
     "OBX (Norvegia)":                {"url": _wiki("OBX_Index"),                   "suffix": ".OL", "min": 20,  "region": "eu"},
-    "WIG20 (Polonia)":               {"url": _wiki("WIG20"),                       "suffix": ".WA", "min": 15,  "region": "eu"},
+    # Wikipedia non ha una tabella dei componenti: principali titoli di Varsavia, elenco curato
+    "Varsavia, principali titoli (Polonia)": {"region": "eu", "as_of": "elenco curato", "tickers": [
+        "PKO.WA", "PKN.WA", "PEO.WA", "PZU.WA", "KGH.WA", "LPP.WA", "ALE.WA", "CDR.WA", "DNP.WA",
+        "MBK.WA", "SPL.WA", "ALR.WA", "BDX.WA", "KRU.WA", "PGE.WA", "OPL.WA", "KTY.WA", "PCO.WA",
+        "CCC.WA", "ZAB.WA", "JSW.WA"]},
 }
 
 # Per ogni borsa, gli indici che ne coprono i titoli principali
@@ -60,13 +68,14 @@ EXCHANGES = {
     "Copenaghen":          ["OMX Copenhagen 25 (Danimarca)"],
     "Helsinki":            ["OMX Helsinki 25 (Finlandia)"],
     "Oslo":                ["OBX (Norvegia)"],
-    "Varsavia":            ["WIG20 (Polonia)"],
+    "Varsavia":            ["Varsavia, principali titoli (Polonia)"],
 }
 EUROPE_EXCHANGES = list(EXCHANGES)
 US_UNIVERSES = [k for k, v in UNIVERSES.items() if v["region"] == "us"]
 
-TICKER_COLUMNS = ["Ticker", "Symbol", "Ticker symbol", "EPIC", "TIDM", "Code",
-                  "Mnemonic", "Stock symbol", "Trading symbol"]
+TICKER_COLUMNS = ["Ticker", "Symbol", "Ticker symbol", "EPIC", "TIDM", "MNEM code", "Mnemonic",
+                  "Code", "Stock symbol", "Trading symbol"]
+TICKER_WORDS = ("ticker", "symbol", "mnem", "epic", "tidm")   # per nomi di colonna non previsti
 EXCHANGE_CODES = {"MI", "DE", "F", "PA", "L", "AS", "MC", "BR", "SW", "LS", "VI",
                   "HE", "IR", "ST", "CO", "OL", "WA"}
 TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{0,11}(\.[A-Z]{1,3})?$")
@@ -113,16 +122,20 @@ def parse_constituents(html: str, suffix: str, min_size: int = 10, columns=None)
         for col in table.columns:
             label = col[-1] if isinstance(col, tuple) else col
             labels.setdefault(str(label).strip(), col)
-        for name in names:
-            if name in labels:
-                symbols = _clean_column(table[labels[name]], suffix)
-                if len(symbols) >= min_size:
-                    return symbols
+        candidates = [n for n in names if n in labels]
+        candidates += [l for l in labels if l not in candidates and "isin" not in l.lower()
+                       and any(w in l.lower() for w in TICKER_WORDS)]
+        for name in candidates:
+            symbols = _clean_column(table[labels[name]], suffix)
+            if len(symbols) >= min_size:
+                return symbols
     # 2) riconoscimento automatico: colonna di valori brevi in maiuscolo
+    isin = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
     for table in tables:
         for col in table.columns:
+            label = str(col[-1] if isinstance(col, tuple) else col).lower()
             raw = [str(v).strip() for v in table[col].dropna().tolist()]
-            if not raw:
+            if not raw or "isin" in label or sum(bool(isin.match(v)) for v in raw) > len(raw) / 2:
                 continue
             uppercase = sum(v == v.upper() and re.search(r"[A-Z]", v) is not None for v in raw)
             symbols = _clean_column(table[col], suffix)
@@ -133,6 +146,8 @@ def parse_constituents(html: str, suffix: str, min_size: int = 10, columns=None)
 
 def fetch_universe(name: str):
     cfg = UNIVERSES[name]
+    if "tickers" in cfg:
+        return list(cfg["tickers"])
     response = requests.get(cfg["url"], headers=HEADERS, timeout=20)
     response.raise_for_status()
     return parse_constituents(response.text, cfg["suffix"], cfg["min"])

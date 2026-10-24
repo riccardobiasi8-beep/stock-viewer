@@ -729,9 +729,12 @@ def trade_plan(ind: dict, info: dict, today: pd.Timestamp) -> dict:
         days_central = _mean([t_vol, t_trend])
         if days_central is not None:
             days_central = max(days_central, 5.0)
-            days_low, days_high = days_central * 0.7, days_central * 1.5
             if days_central > HORIZON_MAX_DAYS:
                 out["exclusions"].append("Tempo stimato oltre l'orizzonte di 6 mesi")
+            # Un titolo quasi fermo può dare stime di migliaia di anni: le limitiamo,
+            # tanto oltre l'orizzonte il titolo è comunque escluso
+            days_central = min(days_central, HORIZON_MAX_DAYS * 4)
+            days_low, days_high = days_central * 0.7, days_central * 1.5
 
     if rr < MIN_RR:
         out["exclusions"].append(
@@ -739,7 +742,10 @@ def trade_plan(ind: dict, info: dict, today: pd.Timestamp) -> dict:
 
     time_stop_date = None
     if days_high is not None:
-        time_stop_date = (today + pd.tseries.offsets.BDay(int(round(days_high)))).date().isoformat()
+        try:
+            time_stop_date = (today + pd.tseries.offsets.BDay(int(round(days_high)))).date().isoformat()
+        except (ValueError, OverflowError, NotImplementedError):
+            time_stop_date = None
 
     out.update({
         "setup": setup, "order": order,

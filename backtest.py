@@ -210,7 +210,7 @@ def simulate(frame: pd.DataFrame, i: int, plan: dict, fill_window: int = FILL_WI
         "filled": True, "outcome": outcome,
         "fill_date": frame.index[fill_j], "exit_date": frame.index[exit_j], "exit_index": exit_j,
         "fill_price": float(fill_price), "exit_price": float(exit_price),
-        "gross_pct": float(gross), "net_pct": float(gross * (1 - TAX_RATE) if gross > 0 else gross),
+        "gross_pct": float(gross),
         "days": int(exit_j - fill_j), "days_low": plan.get("days_low"), "days_high": plan.get("days_high"),
     }
 
@@ -287,13 +287,26 @@ def run_backtest(histories: dict, market_of: dict, sector_of: dict, market_state
     return pd.DataFrame(trades), counts
 
 
+def net_of_tax(mean_gross: float) -> float:
+    """
+    Rendimento medio dopo l'imposta del 26%, applicata al risultato complessivo:
+    le perdite compensano i guadagni (in Italia le minusvalenze su azioni si compensano
+    con le plusvalenze). Se il risultato complessivo è negativo, non ci sono imposte.
+    """
+    return mean_gross * (1 - TAX_RATE) if mean_gross > 0 else mean_gross
+
+
 def summarize(trades: pd.DataFrame) -> dict:
     """Statistiche delle sole operazioni chiuse."""
     closed = trades[trades["outcome"] != "in corso"] if not trades.empty else trades
     if closed.empty:
         return {"chiuse": 0}
-    targets = closed[closed["outcome"] == "target"]
-    in_time = targets[(targets["days_high"].notna()) & (targets["days"] <= targets["days_high"])]
+    mean_gross = closed["gross_pct"].mean()
+    # Tempi: le operazioni arrivate al target sono arrivate dentro la finestra stimata o prima?
+    targets = closed[(closed["outcome"] == "target") & closed["days_low"].notna() & closed["days_high"].notna()]
+    within = ((targets["days"] >= targets["days_low"]) & (targets["days"] <= targets["days_high"])).mean() * 100 \
+        if len(targets) else None
+    before = (targets["days"] < targets["days_low"]).mean() * 100 if len(targets) else None
     return {
         "chiuse": len(closed),
         "in_corso": int((trades["outcome"] == "in corso").sum()),
@@ -301,12 +314,13 @@ def summarize(trades: pd.DataFrame) -> dict:
         "stop_pct": (closed["outcome"] == "stop").mean() * 100,
         "scadenza_pct": (closed["outcome"] == "scadenza").mean() * 100,
         "win_pct": (closed["gross_pct"] > 0).mean() * 100,
-        "media_netta": closed["net_pct"].mean(),
-        "mediana_netta": closed["net_pct"].median(),
-        "media_lorda": closed["gross_pct"].mean(),
+        "media_lorda": mean_gross,
+        "media_netta": net_of_tax(mean_gross),
+        "mediana_lorda": closed["gross_pct"].median(),
         "extra_vs_indice": closed["excess_pct"].dropna().mean() if closed["excess_pct"].notna().any() else None,
         "giorni_medi": closed["days"].mean(),
-        "target_nei_tempi_pct": (len(in_time) / len(targets) * 100) if len(targets) else None,
+        "target_nei_tempi_pct": within,
+        "target_prima_pct": before,
     }
 
 
@@ -321,7 +335,7 @@ def breakdown(trades: pd.DataFrame, by: str) -> pd.DataFrame:
         "Target %": g.apply(lambda x: (x["outcome"] == "target").mean() * 100),
         "Stop %": g.apply(lambda x: (x["outcome"] == "stop").mean() * 100),
         "In guadagno %": g.apply(lambda x: (x["gross_pct"] > 0).mean() * 100),
-        "Netto medio %": g["net_pct"].mean(),
+        "Netto medio %": g["gross_pct"].mean().apply(net_of_tax),
         "Extra vs indice %": g["excess_pct"].mean(),
     }).round(2)
 

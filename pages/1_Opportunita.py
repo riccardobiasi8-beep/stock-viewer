@@ -725,11 +725,12 @@ def render_backtest(bt: dict):
                   else ". Così com'è, il modello non ha aggiunto valore."))
     st.markdown(f"<div class='ios-callout'>{verdict}</div>", unsafe_allow_html=True)
 
-    in_time = summary["target_nei_tempi_pct"]
+    in_time, early = summary["target_nei_tempi_pct"], summary["target_prima_pct"]
     tiles([
         ("Operazioni chiuse", f"{summary['chiuse']}", f"{summary['in_corso']} ancora aperte", LABEL),
-        ("In guadagno", f"{summary['win_pct']:.0f}%", f"mediana {summary['mediana_netta']:+.2f}%", LABEL),
-        ("Netto medio", f"{summary['media_netta']:+.2f}%", f"lordo {summary['media_lorda']:+.2f}%",
+        ("In guadagno", f"{summary['win_pct']:.0f}%", f"operazione tipica {summary['mediana_lorda']:+.2f}% lordo", LABEL),
+        ("Netto medio", f"{summary['media_netta']:+.2f}%",
+         f"lordo {summary['media_lorda']:+.2f}%, tasse sul risultato complessivo",
          GREEN if summary["media_netta"] > 0 else RED),
         ("Rispetto all'indice", f"{extra:+.2f}" if extra is not None else "n.d.", "punti, a parità di giorni",
          GREEN if (extra or 0) > 0 else RED),
@@ -737,12 +738,13 @@ def render_backtest(bt: dict):
         ("Chiuse allo stop", f"{summary['stop_pct']:.0f}%", "", RED),
         ("Uscite a tempo", f"{summary['scadenza_pct']:.0f}%", "", LABEL),
         ("Durata media", f"{summary['giorni_medi']:.0f} sedute",
-         f"target nei tempi stimati: {in_time:.0f}%" if in_time is not None else "", LABEL),
+         (f"target nei tempi stimati {in_time:.0f}%, prima del previsto {early:.0f}%"
+          if in_time is not None else ""), LABEL),
     ], per_row=4)
 
     closed = trades[trades["outcome"] != "in corso"].sort_values("exit_date")
-    section("Andamento cumulato", "Somma dei rendimenti netti delle operazioni chiuse, a importo uguale")
-    curve = closed.set_index("exit_date")["net_pct"].cumsum()
+    section("Andamento cumulato", "Somma dei rendimenti delle operazioni chiuse prima delle tasse, a importo uguale")
+    curve = closed.set_index("exit_date")["gross_pct"].cumsum()
     fig = go.Figure(go.Scatter(x=curve.index, y=curve.values, mode="lines",
                                line=dict(color=BLUE, width=2.5), fill="tozeroy",
                                fillcolor="rgba(0,122,255,0.10)"))
@@ -773,11 +775,12 @@ def render_backtest(bt: dict):
         for col in ("signal_date", "fill_date", "exit_date"):
             view_df[col] = pd.to_datetime(view_df[col]).dt.strftime("%d/%m/%Y")
         st.dataframe(view_df[["ticker", "signal_date", "fill_date", "exit_date", "outcome", "fill_price",
-                              "exit_price", "gross_pct", "net_pct", "excess_pct", "days", "score",
+                              "exit_price", "gross_pct", "excess_pct", "days", "score",
                               "sector_regime"]].round(2), hide_index=True, width="stretch")
     footnote("Limiti: gli elenchi dei titoli sono quelli di oggi, quindi mancano le società uscite dagli indici "
              "o fallite (risultati un po' ottimistici); i settori sono quelli attuali; costi ipotizzati 0,15% per "
-             "lato; imposta del 26% sui soli guadagni. Fondamentali e sentiment non sono verificabili sul passato.")
+             "lato; imposta del 26% sul risultato complessivo, con le perdite che compensano i guadagni (verifica "
+             "il regime fiscale del tuo conto). Fondamentali e sentiment non sono verificabili sul passato.")
 
 
 if view == "Backtest":
